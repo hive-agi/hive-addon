@@ -3,7 +3,7 @@
 
         ;; hive-dsl — Result monad, rescue/guard DSL, error taxonomy (published)
         io.github.hive-agi/hive-dsl
-        {:git/tag "v0.5.1" :git/sha "335869e"}}
+        {:git/tag "v0.5.2" :git/sha "8d9760c"}}
 
  :aliases
  {:dev  {:extra-paths ["dev" "test"]}
