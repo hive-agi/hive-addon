@@ -1,15 +1,28 @@
 {:paths ["src"]
  :deps {org.clojure/clojure {:mvn/version "1.12.1"}
 
-        ;; hive-dsl — Result monad, rescue/guard DSL, error taxonomy (published)
-        io.github.hive-agi/hive-dsl
-        {:git/tag "v0.5.2" :git/sha "8d9760c"}}
+        ;; hive-dsl — Result monad, rescue/guard DSL, error taxonomy.
+        ;; Maven coord (on Clojars) so hive-addon's published pom is self-contained.
+        io.github.hive-agi/hive-dsl {:mvn/version "0.5.2"}
+
+        ;; malli — schema layer for the IAddon contract (self-contained; no hive-spi).
+        ;; The addon bounded context owns its own schemas (DDD). House pin: 0.20.1.
+        metosin/malli {:mvn/version "0.20.1"}}
 
  :aliases
  {:dev  {:extra-paths ["dev" "test"]}
 
   :test {:extra-paths ["test"]
          :extra-deps  {io.github.cognitect-labs/test-runner
-                       {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
+                       {:git/tag "v0.5.1" :git/sha "dfb30dd"}
+                       ;; test.check — backs the malli.generator generative leg
+                       ;; of hive-addon.schema-test (also pulled transitively by
+                       ;; malli, pinned here for reproducibility).
+                       org.clojure/test.check {:mvn/version "1.1.1"}}
          :main-opts ["-m" "cognitect.test-runner"]
-         :exec-fn cognitect.test-runner.api/test}}}
+         :exec-fn cognitect.test-runner.api/test}
+
+  ;; Build + Clojars deploy: clojure -T:build jar | clojure -T:build deploy
+  :build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.5"}
+                 slipset/deps-deploy {:mvn/version "0.2.2"}}
+          :ns-default build}}}

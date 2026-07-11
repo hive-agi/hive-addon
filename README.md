@@ -13,7 +13,7 @@ something entirely unrelated — can host addons by consuming this lib.
 io.github.hive-agi/hive-addon {:git/tag "v0.1.0" :git/sha "..."}
 ```
 
-Deps: Clojure + [hive-dsl](https://github.com/hive-agi/hive-dsl) only. `.cljc`.
+Deps: Clojure + [hive-dsl](https://github.com/hive-agi/hive-dsl) + [malli](https://github.com/metosin/malli). `.cljc`.
 
 ## The contract
 
