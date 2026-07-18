@@ -11,6 +11,7 @@
 
    Rationale lives in hive memory (KG-linked), not here."
   (:require [hive-addon.mount.boundary :as boundary]
+            [hive-addon.mount.compose :as compose]
             [hive-addon.mount.port :as port]
             [hive-addon.mount.schema :as schema]
             [hive-addon.mount.solve :as solve]))
@@ -99,3 +100,23 @@
        plan
        (cond-> (mount! plan host opts)
          (seq errors) (assoc :discovery-errors errors))))))
+
+;; =============================================================================
+;; Re-exports — composition root (plug-select + mount over discovered specs)
+;; =============================================================================
+
+(def compose-plan
+  "hive-addon.mount.compose/compose-plan — pure select+solve over plug layers."
+  compose/compose-plan)
+
+(def compose!
+  "hive-addon.mount.compose/compose! — select+order+mount! into a host."
+  compose/compose!)
+
+(def read-layers
+  "hive-addon.mount.compose/read-layers — paths -> validated plug layers."
+  compose/read-layers)
+
+(def compose-classpath!
+  "hive-addon.mount.compose/compose-classpath! — discover-specs + read-layers + compose!."
+  compose/compose-classpath!)
