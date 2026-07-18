@@ -167,26 +167,29 @@
         ctor (resolve-constructor spec)]
     (if (nil? ctor)
       (mount-result id false :resolved :errors ["constructor could not be resolved"])
-      (let [config   (inject-dependencies (resolve-config spec) host spec all-specs)
-            instance (r/rescue nil (ctor config))]
-        (cond
-          (nil? instance)
-          (mount-result id false :failed :errors ["constructor returned nil or threw"])
+      (let [cfg (r/try-effect (inject-dependencies (resolve-config spec) host spec all-specs))]
+        (if (r/err? cfg)
+          (mount-result id false :config :errors [(:message cfg)])
+          (let [config   (:ok cfg)
+                instance (r/rescue nil (ctor config))]
+            (cond
+              (nil? instance)
+              (mount-result id false :failed :errors ["constructor returned nil or threw"])
 
-          (not (proto/addon? instance))
-          (mount-result id false :failed :errors ["constructor did not return an IAddon"])
+              (not (proto/addon? instance))
+              (mount-result id false :failed :errors ["constructor did not return an IAddon"])
 
-          :else
-          (let [reg (r/try-effect (port/register! host instance))]
-            (if (r/err? reg)
-              (mount-result id false :registered :errors [(:message reg)])
-              (let [init (r/try-effect (port/init! host id config))]
-                (if (r/err? init)
-                  (mount-result id false :initialized :errors [(:message init)])
-                  (let [ir (:ok init)]
-                    (mount-result id (boolean (:success? ir)) :initialized
-                                  :errors (:errors ir)
-                                  :already-initialized? (:already-initialized? ir))))))))))))
+              :else
+              (let [reg (r/try-effect (port/register! host instance))]
+                (if (r/err? reg)
+                  (mount-result id false :registered :errors [(:message reg)])
+                  (let [init (r/try-effect (port/init! host id config))]
+                    (if (r/err? init)
+                      (mount-result id false :initialized :errors [(:message init)])
+                      (let [ir (:ok init)]
+                        (mount-result id (boolean (:success? ir)) :initialized
+                                      :errors (:errors ir)
+                                      :already-initialized? (:already-initialized? ir))))))))))))))
 
 (defn mount!
   "Mount every spec in (plan :ordered) into host, in order. Returns a MountReport.

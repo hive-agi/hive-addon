@@ -55,19 +55,22 @@
                             {:ordered            [a-spec full-spec]
                              :cycles             #{}
                              :missing            {}
-                             :unmet-capabilities {}}))))
+                             :unmet-capabilities {}
+                             :duplicates         {}}))))
   (testing "populated diagnostics validate"
     (is (true? (ms/validate ms/MountPlan
                             {:ordered            []
                              :cycles             #{"a" "b"}
                              :missing            {"a" #{"z"}}
-                             :unmet-capabilities {"b" #{:vector-search}}}))))
+                             :unmet-capabilities {"b" #{:vector-search}}
+                             :duplicates         {"a" 2}}))))
   (testing "malformed plans are rejected"
     (are [x] (false? (ms/validate ms/MountPlan x))
-      {:cycles #{} :missing {} :unmet-capabilities {}}        ; no :ordered
+      {:cycles #{} :missing {} :unmet-capabilities {} :duplicates {}}   ; no :ordered
       {:ordered [{:not "a spec"}] :cycles #{} :missing {}
-       :unmet-capabilities {}}
-      {:ordered [] :cycles ["a"] :missing {} :unmet-capabilities {}}))) ; cycles must be a set
+       :unmet-capabilities {} :duplicates {}}
+      {:ordered [] :cycles ["a"] :missing {}
+       :unmet-capabilities {} :duplicates {}}))) ; cycles must be a set
 
 (deftest mount-result-golden
   (are [x] (true? (ms/validate ms/MountResult x))

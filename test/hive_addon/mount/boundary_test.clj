@@ -101,6 +101,18 @@
 (defn- result-for [report id]
   (first (filter #(= id (:addon/id %)) (:mounted report))))
 
+(defn- throwing-registered-host
+  "An IMountHost whose `registered` always throws; register!/init!/shutdown!
+   work against a backing atom (shutdown! records into shutdown-log)."
+  []
+  (let [reg (atom {})]
+    (reify port/IMountHost
+      (register! [_ addon] (swap! reg assoc (proto/addon-id addon) addon) nil)
+      (init! [_ addon-id config]
+        (proto/initialize! (get @reg addon-id) config))
+      (shutdown! [_ addon-id] (swap! shutdown-log conj addon-id) nil)
+      (registered [_ _addon-id] (throw (ex-info "registered boom" {}))))))
+
 ;; ---------------------------------------------------------------------------
 ;; mount! — order + DIP sibling injection
 ;; ---------------------------------------------------------------------------
@@ -213,3 +225,52 @@
       (is (ms/validate ms/TeardownReport td))
       (testing "TeardownReport rejects :teardown/data-preserved? false (no-nuke)"
         (is (not (ms/validate ms/TeardownReport (assoc td :teardown/data-preserved? false))))))))
+
+(deftest graceful-degrade-throwing-resolve-config
+  (testing "an injected resolve-config that throws for one spec is caught per-spec: earlier and later specs still mount, no teardown occurs"
+    (let [host   (port/atom-mount-host)
+          specs  [(spec "a" "make-ok-addon")
+                  (spec "b" "make-ok-addon" :deps #{"a"})
+                  (spec "c" "make-ok-addon" :deps #{"b"})]
+          plan   (solve/solve specs)
+          rc     (fn [spec]
+                   (if (= "b" (:addon/id spec))
+                     (throw (ex-info "DI fail" {}))
+                     (:addon/config spec {})))
+          report (boundary/mount! plan host {:resolve-config rc})]
+      (is (= ["a" "b" "c"] (:order report)))
+      (is (false? (:ok? report)))
+      (testing "a mounted"
+        (is (:success? (result-for report "a")))
+        (is (some? (port/registered host "a"))))
+      (testing "b recorded failed at the config seam, not thrown"
+        (is (false? (:success? (result-for report "b"))))
+        (is (= :config (:phase (result-for report "b"))))
+        (is (nil? (port/registered host "b"))))
+      (testing "c STILL mounts after the DI-seam failure"
+        (is (:success? (result-for report "c")))
+        (is (some? (port/registered host "c"))))
+      (testing "no teardown of already-mounted addons"
+        (is (= [] @shutdown-log)))
+      (is (contains? (:skipped report) "b"))
+      (is (ms/validate ms/MountReport report)))))
+
+(deftest graceful-degrade-throwing-registered
+  (testing "a custom IMountHost whose `registered` throws is caught per-spec: independent specs still mount, no teardown occurs"
+    (let [host   (throwing-registered-host)
+          specs  [(spec "a" "make-ok-addon")
+                  (spec "b" "make-ok-addon" :deps #{"a"})
+                  (spec "d" "make-ok-addon")]
+          plan   (solve/solve specs)
+          report (boundary/mount! plan host)]
+      (is (false? (:ok? report)))
+      (testing "a mounted (no dep lookup, so registered never called)"
+        (is (:success? (result-for report "a"))))
+      (testing "b recorded failed at the config seam when registered threw"
+        (is (false? (:success? (result-for report "b"))))
+        (is (= :config (:phase (result-for report "b")))))
+      (testing "the independent d STILL mounts despite the throwing sibling lookup"
+        (is (:success? (result-for report "d"))))
+      (testing "the throwing sibling lookup did not abort mount! or tear anything down"
+        (is (= [] @shutdown-log)))
+      (is (ms/validate ms/MountReport report)))))

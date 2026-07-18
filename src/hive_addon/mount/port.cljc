@@ -6,7 +6,7 @@
    in-memory implementation (atom-mount-host) for tests, dry-run, and non-MCP
    hosts; a real host (an MCP server) supplies its own. resolve-config-default
    is the identity-ish config resolver — a host may inject a richer one (e.g.
-   hive-di-backed) at the boundary, so hive-addon never depends on hive-di.
+   hive-di-backed) at the boundary.
 
    register!/shutdown! are no-nuke: a duplicate register! MUST NOT throw and
    shutdown! MUST NOT delete data."
@@ -22,8 +22,7 @@
 
 (defprotocol IMountHost
   "Abstraction over an addon host registry. The mounter depends on this port,
-   never a concrete registry — hierarchical hosting is a future
-   host-delegates-to-sub-registry, not special-cased here (OCP)."
+   never a concrete registry."
   (register! [host addon]
     "Put an addon instance into the host registry, keyed by its addon-id.
      Returns host. MUST NOT throw for a normal duplicate (idempotent-ish).")

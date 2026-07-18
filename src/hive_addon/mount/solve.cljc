@@ -2,10 +2,9 @@
   "Pure DAG solver for the addon mounter — spec set -> MountPlan. No IO, no var
    resolution.
 
-   Ordering constraints are an OCP rule-chain: IDependencyRule turns the spec set
+   Ordering constraints are a rule-chain: IDependencyRule turns the spec set
    into directed [from-id to-id] edges (from mounts before to); `edges` folds the
-   chain into one edge set. A new constraint is a new rule conj'd onto the chain
-   — `solve` never changes to add one. Two built-in rules cover hard id deps
+   chain into one edge set. Two built-in rules cover hard id deps
    (:addon/dependencies) and looser capability deps (:addon/requires-capabilities
    satisfied by any peer whose :addon/capabilities contains the cap).
 
@@ -25,10 +24,8 @@
 ;; =============================================================================
 
 (defprotocol IDependencyRule
-  "One ordering-constraint rule. Turns the spec set into a set of directed edges
-   [from-id to-id], each meaning from-id must mount before to-id. Adding a
-   constraint means adding a rule — no existing rule, and not `edges`/`solve`,
-   has to change."
+  "One ordering-constraint rule. -edges turns the spec set into a set of directed
+   edges [from-id to-id], each meaning from-id must mount before to-id."
   (-edges [this specs]
     "Spec set -> #{[from-id to-id] ...} directed edges this rule contributes."))
 
@@ -111,35 +108,41 @@
      :cycles              ids that could not be ordered (in/downstream of a cycle)
      :missing             id -> declared dep ids absent from the spec set
      :unmet-capabilities  id -> required caps no active spec provides
+     :duplicates          id -> count, for any :addon/id shared by >1 spec
    Missing deps and unmet caps are reported but do NOT drop the spec from
-   :ordered (graceful); cyclic ids are excluded from :ordered.
+   :ordered (graceful); a duplicated id keeps one surviving spec in :ordered;
+   cyclic ids are excluded from :ordered.
 
    Graceful default returns a MountPlan even with cycles. :fail-closed-cycles
    true returns (r/err :mount/unsolvable {:cycles ...}) when cycles exist."
   ([specs] (solve specs {}))
   ([specs {:keys [rules fail-closed-cycles]
            :or   {rules default-rules fail-closed-cycles false}}]
-   (let [specs    (set specs)
-         by-id    (into {} (map (juxt :addon/id identity)) specs)
-         ids      (set (keys by-id))
-         edge-set (edges specs rules)
+   (let [specs      (set specs)
+         by-id      (into {} (map (juxt :addon/id identity)) specs)
+         ids        (set (keys by-id))
+         duplicates (into {}
+                          (keep (fn [[id ss]] (when (> (count ss) 1) [id (count ss)])))
+                          (group-by :addon/id specs))
+         edge-set   (edges specs rules)
          [ordered-ids cyclic] (topo-sort ids edge-set)
-         ordered  (into [] (map by-id) ordered-ids)
-         missing  (into {}
-                        (keep (fn [s]
-                                (let [absent (into #{} (remove ids) (:addon/dependencies s #{}))]
-                                  (when (seq absent) [(:addon/id s) absent]))))
-                        specs)
-         provided (into #{} (mapcat :addon/capabilities) specs)
-         unmet    (into {}
-                        (keep (fn [s]
-                                (let [need (into #{} (remove provided)
-                                                 (:addon/requires-capabilities s #{}))]
-                                  (when (seq need) [(:addon/id s) need]))))
-                        specs)]
+         ordered    (into [] (map by-id) ordered-ids)
+         missing    (into {}
+                          (keep (fn [s]
+                                  (let [absent (into #{} (remove ids) (:addon/dependencies s #{}))]
+                                    (when (seq absent) [(:addon/id s) absent]))))
+                          specs)
+         provided   (into #{} (mapcat :addon/capabilities) specs)
+         unmet      (into {}
+                          (keep (fn [s]
+                                  (let [need (into #{} (remove provided)
+                                                   (:addon/requires-capabilities s #{}))]
+                                    (when (seq need) [(:addon/id s) need]))))
+                          specs)]
      (if (and fail-closed-cycles (seq cyclic))
        (r/err :mount/unsolvable {:cycles cyclic})
        {:ordered            ordered
         :cycles             cyclic
         :missing            missing
-        :unmet-capabilities unmet}))))
+        :unmet-capabilities unmet
+        :duplicates         duplicates}))))

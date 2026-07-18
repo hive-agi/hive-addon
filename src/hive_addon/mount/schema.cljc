@@ -6,9 +6,9 @@
    Shapes are uncompiled malli DATA (house idiom: PascalCase defs) seeded into a
    LOCAL composite registry that COMPOSES hive-addon.schema's registry — the
    AddonId/AddonType/CapabilitySet value objects are reused, never redefined.
-   The registry is NEVER installed as the malli global default (shared-JVM
-   safety); reach it via `schema`/`validate`/`explain`/`validate*` or by passing
-   {:registry registry} yourself.
+   The registry is NEVER installed as the malli global default; reach it via
+   `schema`/`validate`/`explain`/`validate*` or by passing {:registry registry}
+   yourself.
 
    Mount shapes are registered under :mount/* keys (:mount/spec, :mount/plan,
    :mount/result, :mount/report, :mount/teardown-report).
@@ -31,11 +31,9 @@
 
 (def MountSpec
   "The declarative mount manifest value object — a data description of an addon
-   to mount (identity, constructor coordinates, deps, capabilities). Deliberately
-   NOT named Manifest (naming discipline: avoids the 3-way collision with
-   hive-mcp.addons.manifest, the iaddon.edn plug, and hive-di defmanifest).
-   Reuses hive-addon.schema value objects for :addon/id, :addon/type,
-   :addon/capabilities. Open."
+   to mount (identity, constructor coordinates, deps, capabilities). Reuses
+   hive-addon.schema value objects for :addon/id, :addon/type, :addon/capabilities.
+   Open."
   [:map {:closed false}
    [:addon/id s/AddonId]
    [:addon/type s/AddonType]
@@ -54,13 +52,15 @@
 (def MountPlan
   "Pure output of solve — the ordered mount plan plus diagnostics as data. No
    IO, no resolved constructors. :ordered is the deterministic topo order (deps
-   before dependents); :cycles/:missing/:unmet-capabilities record the graceful
-   diagnostics. Open."
+   before dependents); :cycles/:missing/:unmet-capabilities/:duplicates record
+   the graceful diagnostics (:duplicates maps an :addon/id shared by >1 spec to
+   its count; one surviving spec still appears in :ordered). Open."
   [:map {:closed false}
    [:ordered [:sequential MountSpec]]
    [:cycles [:set s/AddonId]]
    [:missing [:map-of s/AddonId [:set s/AddonId]]]
-   [:unmet-capabilities [:map-of s/AddonId [:set :keyword]]]])
+   [:unmet-capabilities [:map-of s/AddonId [:set :keyword]]]
+   [:duplicates [:map-of s/AddonId :int]]])
 
 (def MountResult
   "Per-addon mount outcome. :phase records how far the addon got; :success?
@@ -68,7 +68,7 @@
   [:map {:closed false}
    [:addon/id s/AddonId]
    [:success? :boolean]
-   [:phase [:enum :resolved :registered :initialized :skipped :failed]]
+   [:phase [:enum :config :resolved :registered :initialized :skipped :failed]]
    [:errors {:optional true} [:sequential :string]]
    [:already-initialized? {:optional true} :boolean]])
 

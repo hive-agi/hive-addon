@@ -2,9 +2,12 @@
   "Facade for the addon mounter — the public surface a host consumes.
 
    Re-exports the pure solver (solve), the effectful boundary (mount!, dry-run,
-   teardown!, discover-specs, parse-spec), the DIP port (IMountHost,
-   atom-mount-host), and the schema validators/keys. mount-classpath! is the
-   one-call composition root: discover-specs -> solve -> mount!.
+   teardown!, discover-specs, parse-spec), the DIP config resolver + host
+   constructor (resolve-config-default, atom-mount-host), and the schema
+   validators/keys. mount-classpath! is the one-call composition root:
+   discover-specs -> solve -> mount!. The IMountHost protocol is NOT re-exported
+   (a protocol cannot be plain-def aliased) — implement it from its canonical
+   home hive-addon.mount.port.
 
    Rationale lives in hive memory (KG-linked), not here."
   (:require [hive-addon.mount.boundary :as boundary]

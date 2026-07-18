@@ -152,3 +152,18 @@
     (testing "solve honors injected rules without any change to solve itself"
       (is (= ["z" "a" "b"]
              (ids (solve/solve specs {:rules custom-rules})))))))
+
+(deftest duplicate-addon-ids
+  (testing "two specs sharing an :addon/id are reported in :duplicates; a surviving spec still orders; determinism preserved"
+    (let [specs [(assoc (spec "a") :addon/version "1.0.0")
+                 (assoc (spec "a") :addon/version "2.0.0")
+                 (spec "b" :deps #{"a"})]
+          plan  (solve/solve specs)]
+      (is (contains? (:duplicates plan) "a"))
+      (is (= 2 (get (:duplicates plan) "a")))
+      (is (= ["a" "b"] (ids plan)))
+      (is (valid-plan? plan))
+      (testing "determinism: shuffled input ⇒ identical :duplicates and :ordered"
+        (let [p2 (solve/solve (reverse specs))]
+          (is (= (:duplicates plan) (:duplicates p2)))
+          (is (= (ids plan) (ids p2))))))))
