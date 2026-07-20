@@ -1,0 +1,48 @@
+name: clojars
+# Publish io.github.hive-agi/hive-addon <VERSION> to Clojars on every main push.
+# Idempotent: skips when the VERSION already exists on Clojars, so re-pushes
+# and non-release merges stay green. Companion to release.yml (git tag + GH release).
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - '.github/**'
+  workflow_dispatch:
+
+jobs:
+  clojars:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Read version
+        id: version
+        run: echo "version=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_OUTPUT"
+      - name: Check if version already on Clojars
+        id: exists
+        run: |
+          V="${{ steps.version.outputs.version }}"
+          if curl -sfI "https://repo.clojars.org/io/github/hive-agi/hive-addon/${V}/hive-addon-${V}.pom" >/dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: DeLaGuardo/setup-clojure@13.0
+        if: steps.exists.outputs.exists == 'false'
+        with:
+          cli: latest
+      - name: Cache ~/.m2
+        if: steps.exists.outputs.exists == 'false'
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2
+          key: m2-${{ hashFiles('deps.edn') }}
+          restore-keys: m2-
+      - name: Deploy to Clojars
+        if: steps.exists.outputs.exists == 'false'
+        env:
+          CLOJARS_USERNAME: ${{ secrets.CLOJARS_USERNAME }}
+          CLOJARS_PASSWORD: ${{ secrets.CLOJARS_DEPLOY_TOKEN }}
+        run: clojure -T:build deploy
