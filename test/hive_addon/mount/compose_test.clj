@@ -14,8 +14,12 @@
 ;; -----------------------------------------------------------------------------
 
 (def captured (atom {}))
+(def compose-init-attempts (atom 0))
 
-(use-fixtures :each (fn [t] (reset! captured {}) (t)))
+(use-fixtures :each (fn [t]
+                      (reset! captured {})
+                      (reset! compose-init-attempts 0)
+                      (t)))
 
 (defn- fake-addon [id config]
   (swap! captured assoc id config)
@@ -34,6 +38,22 @@
 (defn ctor-a [config] (fake-addon "a" config))
 (defn ctor-b [config] (fake-addon "b" config))
 (defn ctor-c [config] (fake-addon "c" config))
+
+(defn ctor-flaky [config]
+  (let [id (:addon/id config)]
+    (reify proto/IAddon
+      (addon-id [_] id)
+      (addon-type [_] :native)
+      (capabilities [_] #{})
+      (initialize! [_ _]
+        {:success? (>= (swap! compose-init-attempts inc) 2)
+         :errors ["not ready"]})
+      (shutdown! [_] nil)
+      (tools [_] [])
+      (schema-extensions [_] {})
+      (health [_] {:status :ok})
+      (excluded-tools [_] #{})
+      (hooks [_] {}))))
 
 (defn- spec [id ctor & {:as extra}]
   (merge {:addon/id      id
@@ -188,6 +208,22 @@
         (is (:ok? report))
         (is (= solve-order (:order report)))
         (is (= #{"a" "b" "c"} (set (keys @captured))))))))
+
+(deftest compose-threads-init-retry-and-event-opts
+  (let [events (atom [])
+        flaky (spec "flaky" "ctor-flaky"
+                    :addon/config {:addon/id "flaky"}
+                    :addon/init-retry {:max-attempts 2
+                                       :initial-delay-ms 0
+                                       :max-delay-ms 0
+                                       :backoff-factor 2})
+        result (compose/compose! [flaky] [] (port/atom-mount-host)
+                                 {:sleep-fn (constantly nil)
+                                  :on-event #(swap! events conj %)})]
+    (is (r/ok? result))
+    (is (get-in result [:ok :report :ok?]))
+    (is (= 2 @compose-init-attempts))
+    (is (some #(= :mount/init-retry (:event %)) @events))))
 
 ;; -----------------------------------------------------------------------------
 ;; read-layers — filesystem + validation
