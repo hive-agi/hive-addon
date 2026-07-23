@@ -60,6 +60,10 @@
   "hive-addon.mount.boundary/teardown! — reverse-order shutdown, no-nuke."
   boundary/teardown!)
 
+(def default-init-retry
+  "hive-addon.mount.boundary/default-init-retry — one-attempt compatibility policy."
+  boundary/default-init-retry)
+
 ;; =============================================================================
 ;; Re-exports — DIP port
 ;; =============================================================================
@@ -88,7 +92,7 @@
   "One-call composition root: discover-specs -> solve -> mount!. Returns a
    MountReport; discovery :errors are attached under the report's :discovery-errors
    key. opts thread to solve (:rules, :fail-closed-cycles) and mount!
-   (:resolve-config).
+   (:resolve-config, :init-retry, :on-event, :sleep-fn).
 
    When :fail-closed-cycles true and the discovered specs contain a cycle, solve
    returns (r/err :mount/unsolvable ...) and that error is returned as-is."

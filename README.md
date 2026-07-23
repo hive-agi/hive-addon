@@ -10,7 +10,7 @@ something entirely unrelated — can host addons by consuming this lib.
 ## Coordinates
 
 ```clojure
-io.github.hive-agi/hive-addon {:git/tag "v0.1.0" :git/sha "..."}
+io.github.hive-agi/hive-addon {:mvn/version "0.3.2"}
 ```
 
 Deps: Clojure + [hive-dsl](https://github.com/hive-agi/hive-dsl) + [malli](https://github.com/metosin/malli). `.cljc`.
@@ -48,6 +48,26 @@ and constants (`valid-addon-types`, `standard-capabilities`, `health-statuses`).
   (excluded-tools [_] #{})
   (hooks        [_] {}))
 ```
+
+## Reliable mounting
+
+Mount manifests may request bounded initialization retries:
+
+~~~clojure
+{:addon/id "my.addon"
+ :addon/type :native
+ :addon/init-ns "my.addon"
+ :addon/init-fn "addon-ctor"
+ :addon/init-retry {:max-attempts 4
+                    :initial-delay-ms 250
+                    :max-delay-ms 2000
+                    :backoff-factor 2}}
+~~~
+
+hive-addon.mount/mount-classpath! and
+hive-addon.mount/compose-classpath! accept :on-event for structured lifecycle
+events and :sleep-fn for deterministic tests. Mount results report
+:init-attempts.
 
 ## Releasing
 

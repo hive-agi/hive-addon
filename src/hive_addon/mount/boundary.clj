@@ -150,10 +150,112 @@
     (assoc config :mount/dependencies deps)))
 
 (defn- mount-result
-  [id success? phase & {:keys [errors already-initialized?]}]
+  [id success? phase & {:keys [errors already-initialized? init-attempts]}]
   (cond-> {:addon/id id :success? success? :phase phase}
     (seq errors)                (assoc :errors (vec errors))
-    (some? already-initialized?) (assoc :already-initialized? already-initialized?)))
+    (some? already-initialized?) (assoc :already-initialized? already-initialized?)
+    (some? init-attempts)        (assoc :init-attempts init-attempts)))
+
+(def default-init-retry
+  "Default bounded initializer retry policy. :max-attempts counts the first call."
+  {:max-attempts 1
+   :initial-delay-ms 100
+   :max-delay-ms 5000
+   :backoff-factor 2})
+
+(defn- retry-policy
+  [spec override]
+  (let [{:keys [max-attempts initial-delay-ms max-delay-ms backoff-factor] :as policy}
+        (merge default-init-retry (:addon/init-retry spec) override)]
+    (when-not (pos-int? max-attempts)
+      (throw (ex-info ":max-attempts must be a positive integer" {:policy policy})))
+    (when-not (and (int? initial-delay-ms) (not (neg? initial-delay-ms)))
+      (throw (ex-info ":initial-delay-ms must be a non-negative integer" {:policy policy})))
+    (when-not (and (int? max-delay-ms) (not (neg? max-delay-ms)))
+      (throw (ex-info ":max-delay-ms must be a non-negative integer" {:policy policy})))
+    (when-not (and (number? backoff-factor) (<= 1 backoff-factor))
+      (throw (ex-info ":backoff-factor must be a number >= 1" {:policy policy})))
+    policy))
+
+(defn- retry-delay-ms
+  [{:keys [initial-delay-ms max-delay-ms backoff-factor]} attempt]
+  (long
+   (min max-delay-ms
+        (* initial-delay-ms
+           (Math/pow (double backoff-factor) (double (dec attempt)))))))
+
+(defn- emit!
+  [on-event event]
+  (when on-event
+    (r/rescue nil (on-event event))))
+
+(defn- init-attempt
+  [host id config]
+  (let [effect (r/try-effect (port/init! host id config))]
+    (if (r/err? effect)
+      {:success? false :errors [(:message effect)]}
+      (let [result (:ok effect)]
+        (if (map? result)
+          (if (:success? result)
+            result
+            (update result :errors
+                    #(if (seq %) (vec %) ["initializer reported failure"])))
+          {:success? false
+           :errors ["initializer returned a non-map result"]})))))
+
+(defn- retry-init!
+  [host id config policy on-event sleep-fn]
+  (loop [attempt 1]
+    (emit! on-event {:event :mount/init-attempt
+                     :level :debug
+                     :addon/id id
+                     :attempt attempt
+                     :max-attempts (:max-attempts policy)})
+    (let [result (init-attempt host id config)
+          result (assoc result :init-attempts attempt)]
+      (cond
+        (:success? result)
+        (do
+          (emit! on-event {:event :mount/init-succeeded
+                           :level :info
+                           :addon/id id
+                           :attempt attempt
+                           :max-attempts (:max-attempts policy)})
+          result)
+
+        (>= attempt (:max-attempts policy))
+        (do
+          (emit! on-event {:event :mount/init-failed
+                           :level :error
+                           :addon/id id
+                           :attempt attempt
+                           :max-attempts (:max-attempts policy)
+                           :errors (vec (:errors result))})
+          result)
+
+        :else
+        (let [delay-ms (retry-delay-ms policy attempt)]
+          (emit! on-event {:event :mount/init-retry
+                           :level :warn
+                           :addon/id id
+                           :attempt attempt
+                           :next-attempt (inc attempt)
+                           :max-attempts (:max-attempts policy)
+                           :delay-ms delay-ms
+                           :errors (vec (:errors result))})
+          (let [sleep-result (r/try-effect (sleep-fn delay-ms))]
+            (if (r/err? sleep-result)
+              (let [failed {:success? false
+                            :errors [(str "retry delay failed: " (:message sleep-result))]
+                            :init-attempts attempt}]
+                (emit! on-event {:event :mount/init-failed
+                                 :level :error
+                                 :addon/id id
+                                 :attempt attempt
+                                 :max-attempts (:max-attempts policy)
+                                 :errors (:errors failed)})
+                failed)
+              (recur (inc attempt)))))))))
 
 ;; =============================================================================
 ;; mount! — drive the plan through the host, graceful degrade
@@ -162,15 +264,17 @@
 (defn- mount-one
   "Attempt to mount a single spec into host. Returns a MountResult. Never
    throws — every failure is folded into the result (graceful degrade)."
-  [spec host all-specs resolve-config]
+  [spec host all-specs resolve-config init-retry on-event sleep-fn]
   (let [id   (:addon/id spec)
         ctor (resolve-constructor spec)]
     (if (nil? ctor)
       (mount-result id false :resolved :errors ["constructor could not be resolved"])
-      (let [cfg (r/try-effect (inject-dependencies (resolve-config spec) host spec all-specs))]
+      (let [cfg (r/try-effect
+                 {:config (inject-dependencies (resolve-config spec) host spec all-specs)
+                  :retry-policy (retry-policy spec init-retry)})]
         (if (r/err? cfg)
           (mount-result id false :config :errors [(:message cfg)])
-          (let [config   (:ok cfg)
+          (let [{:keys [config retry-policy]} (:ok cfg)
                 instance (r/rescue nil (ctor config))]
             (cond
               (nil? instance)
@@ -183,13 +287,11 @@
               (let [reg (r/try-effect (port/register! host instance))]
                 (if (r/err? reg)
                   (mount-result id false :registered :errors [(:message reg)])
-                  (let [init (r/try-effect (port/init! host id config))]
-                    (if (r/err? init)
-                      (mount-result id false :initialized :errors [(:message init)])
-                      (let [ir (:ok init)]
-                        (mount-result id (boolean (:success? ir)) :initialized
-                                      :errors (:errors ir)
-                                      :already-initialized? (:already-initialized? ir))))))))))))))
+                  (let [ir (retry-init! host id config retry-policy on-event sleep-fn)]
+                    (mount-result id (boolean (:success? ir)) :initialized
+                                  :errors (:errors ir)
+                                  :already-initialized? (:already-initialized? ir)
+                                  :init-attempts (:init-attempts ir))))))))))))
 
 (defn mount!
   "Mount every spec in (plan :ordered) into host, in order. Returns a MountReport.
@@ -199,11 +301,20 @@
    already-mounted addons are NEVER torn down (graceful degrade). :ok? is true
    only when every attempted spec succeeded.
 
-   opts: {:resolve-config (fn [spec] -> config-map)  (default resolve-config-default)}"
+   opts: {:resolve-config (fn [spec] -> config-map)  (default resolve-config-default)
+          :init-retry    retry-policy override
+          :on-event      (fn [event-map])
+          :sleep-fn      (fn [milliseconds])}."
   ([plan host] (mount! plan host {}))
-  ([plan host {:keys [resolve-config] :or {resolve-config port/resolve-config-default}}]
+  ([plan host {:keys [resolve-config init-retry on-event sleep-fn]
+               :or {resolve-config port/resolve-config-default
+                    init-retry {}
+                    on-event (constantly nil)
+                    sleep-fn (fn [ms] (Thread/sleep (long ms)))}}]
    (let [ordered (:ordered plan)
-         results (mapv #(mount-one % host ordered resolve-config) ordered)]
+         results (mapv #(mount-one % host ordered resolve-config
+                                   init-retry on-event sleep-fn)
+                       ordered)]
      {:mounted results
       :order   (mapv :addon/id ordered)
       :skipped (into #{} (comp (remove :success?) (map :addon/id)) results)

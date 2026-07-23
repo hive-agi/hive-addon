@@ -29,6 +29,15 @@
 ;; Value-object schemas — uncompiled malli DATA (house idiom: PascalCase defs)
 ;; =============================================================================
 
+(def InitRetryPolicy
+  "Bounded initializer retry policy. :max-attempts includes the first call."
+  [:map {:closed false}
+   [:max-attempts {:optional true} [:int {:min 1}]]
+   [:initial-delay-ms {:optional true} [:int {:min 0}]]
+   [:max-delay-ms {:optional true} [:int {:min 0}]]
+   [:backoff-factor {:optional true}
+    [:or [:int {:min 1}] [:double {:min 1.0}]]]])
+
 (def MountSpec
   "The declarative mount manifest value object — a data description of an addon
    to mount (identity, constructor coordinates, deps, capabilities). Reuses
@@ -45,6 +54,7 @@
    [:addon/capabilities {:optional true :default #{}} s/CapabilitySet]
    [:addon/dependencies {:optional true :default #{}} [:set s/AddonId]]
    [:addon/requires-capabilities {:optional true :default #{}} [:set :keyword]]
+   [:addon/init-retry {:optional true} InitRetryPolicy]
    [:addon/description {:optional true} [:maybe :string]]
    [:addon/author {:optional true} [:maybe :string]]
    [:addon/license {:optional true} [:maybe :string]]])
@@ -70,6 +80,7 @@
    [:success? :boolean]
    [:phase [:enum :config :resolved :registered :initialized :skipped :failed]]
    [:errors {:optional true} [:sequential :string]]
+   [:init-attempts {:optional true} [:int {:min 1}]]
    [:already-initialized? {:optional true} :boolean]])
 
 (def MountReport
@@ -96,7 +107,8 @@
 
 (def ^:private mount-schemas
   "Static :mount/* -> schema map seeded into the local registry."
-  {:mount/spec            MountSpec
+  {:mount/init-retry-policy InitRetryPolicy
+   :mount/spec            MountSpec
    :mount/plan            MountPlan
    :mount/result          MountResult
    :mount/report          MountReport

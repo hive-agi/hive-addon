@@ -23,6 +23,10 @@
    :addon/capabilities           #{:cartography}
    :addon/dependencies           #{"a"}
    :addon/requires-capabilities  #{:vector-search}
+   :addon/init-retry             {:max-attempts 3
+                                  :initial-delay-ms 100
+                                  :max-delay-ms 1000
+                                  :backoff-factor 2}
    :addon/description            "the b addon"
    :addon/author                 nil
    :addon/license                "MIT"})
@@ -42,6 +46,9 @@
       (assoc a-spec :addon/kind :nonsense)
       (assoc a-spec :addon/dependencies ["a"])          ; must be a set
       (assoc a-spec :addon/requires-capabilities #{"x"}) ; caps are keywords
+      (assoc a-spec :addon/init-retry {:max-attempts 0})
+      (assoc a-spec :addon/init-retry {:initial-delay-ms -1})
+      (assoc a-spec :addon/init-retry {:backoff-factor 0})
       )))
 
 (deftest mount-spec-registry-key
@@ -75,10 +82,12 @@
 (deftest mount-result-golden
   (are [x] (true? (ms/validate ms/MountResult x))
     {:addon/id "a" :success? true :phase :initialized}
+    {:addon/id "a" :success? true :phase :initialized :init-attempts 2}
     {:addon/id "a" :success? false :phase :failed :errors ["boom"]}
     {:addon/id "a" :success? true :phase :skipped :already-initialized? true})
   (are [x] (false? (ms/validate ms/MountResult x))
     {:addon/id "a" :success? true :phase :bogus}
+    {:addon/id "a" :success? true :phase :initialized :init-attempts 0}
     {:addon/id "a" :phase :resolved}                    ; no :success?
     {:success? true :phase :resolved}))                 ; no :addon/id
 

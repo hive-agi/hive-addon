@@ -154,7 +154,8 @@
   "Full composition: compose-plan then mount! the plan into host, threading
    per-addon build.edn :config over the base resolve-config. opts:
    {:profile :rules :fail-closed-cycles :strict-select
-    :resolve-config (base, default port/resolve-config-default)}. Returns
+    :resolve-config (base, default port/resolve-config-default)
+    :init-retry :on-event :sleep-fn}. Returns
    (r/ok {<compose-plan keys> :report MountReport}) or the (r/err ...) from
    compose-plan. Mount failures are recorded in :report (graceful degrade)."
   ([discovered-specs layers host] (compose! discovered-specs layers host {}))
@@ -165,7 +166,9 @@
                                                         :fail-closed-cycles :strict-select]))]
      (let [{:keys [plan config-by-id]} composed
            report (boundary/mount! plan host
-                                   {:resolve-config (compose-config-resolver resolve-config config-by-id)})]
+                                   (assoc (select-keys opts [:init-retry :on-event :sleep-fn])
+                                          :resolve-config
+                                          (compose-config-resolver resolve-config config-by-id)))]
        (r/ok (assoc composed :report report))))))
 
 (defn- parse-validate-layer
@@ -221,8 +224,8 @@
    from :layer-paths + compose! into host. Returns (r/ok {<compose! keys>
    :discovery-errors [..] :layer-errors [..]}) or the (r/err ...) from compose!.
    :layer-paths defaults to [] ⇒ mount every discovered spec (≡ mount-classpath!).
-   opts also threads :profile :rules :fail-closed-cycles :strict-select
-   :resolve-config."
+   opts also threads :profile :rules :fail-closed-cycles :strict-select,
+   :resolve-config, :init-retry, :on-event, and :sleep-fn."
   ([host] (compose-classpath! host {}))
   ([host {:keys [layer-paths] :as opts}]
    (let [{:keys [specs errors]}            (boundary/discover-specs)

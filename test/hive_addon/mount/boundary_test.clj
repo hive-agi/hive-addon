@@ -17,11 +17,13 @@
 
 (def ctor-configs   (atom {}))   ; id -> config the ctor received (sibling-injection probe)
 (def shutdown-log   (atom []))   ; ids shut down, in call order
+(def init-calls     (atom {}))
 
 (use-fixtures :each
   (fn [t]
     (reset! ctor-configs {})
     (reset! shutdown-log [])
+    (reset! init-calls {})
     (t)))
 
 ;; ---------------------------------------------------------------------------
@@ -75,6 +77,27 @@
       (capabilities [_] #{})
       (initialize! [_ _cfg] (throw (ex-info "boom in init" {})))
       (shutdown! [_] (swap! shutdown-log conj id) nil)
+      (tools [_] [])
+      (schema-extensions [_] [])
+      (health [_] {:status :ok})
+      (excluded-tools [_] #{})
+      (hooks [_] {}))))
+
+(defn make-flaky-init
+  "Ctor whose initializer succeeds on the configured attempt."
+  [config]
+  (let [id (:addon/id config)
+        succeed-at (:__succeed-at config Long/MAX_VALUE)]
+    (reify proto/IAddon
+      (addon-id [_] id)
+      (addon-type [_] :native)
+      (capabilities [_] #{})
+      (initialize! [_ _cfg]
+        (let [attempt (get (swap! init-calls update id (fnil inc 0)) id)]
+          (if (>= attempt succeed-at)
+            {:success? true}
+            {:success? false :errors [(str "not ready " attempt)]})))
+      (shutdown! [_] nil)
       (tools [_] [])
       (schema-extensions [_] [])
       (health [_] {:status :ok})
@@ -182,6 +205,74 @@
         (is (= [] @shutdown-log)))
       (is (contains? (:skipped report) "a-nil"))
       (is (ms/validate ms/MountReport report)))))
+
+(deftest init-retries-with-backoff-and-events
+  (let [host (port/atom-mount-host)
+        sleeps (atom [])
+        events (atom [])
+        retry {:max-attempts 4
+               :initial-delay-ms 10
+               :max-delay-ms 100
+               :backoff-factor 2}
+        flaky (-> (spec "flaky" "make-flaky-init")
+                  (assoc :addon/init-retry retry)
+                  (assoc-in [:addon/config :__succeed-at] 3))
+        report (boundary/mount! (solve/solve [flaky]) host
+                                {:sleep-fn #(swap! sleeps conj %)
+                                 :on-event #(swap! events conj %)})
+        result (result-for report "flaky")]
+    (is (:ok? report))
+    (is (:success? result))
+    (is (= 3 (:init-attempts result)))
+    (is (= 3 (get @init-calls "flaky")))
+    (is (= [10 20] @sleeps))
+    (is (= [:mount/init-attempt
+            :mount/init-retry
+            :mount/init-attempt
+            :mount/init-retry
+            :mount/init-attempt
+            :mount/init-succeeded]
+           (mapv :event @events)))
+    (is (ms/validate ms/MountReport report))))
+
+(deftest init-retry-exhaustion-reports-last-attempt
+  (let [host (port/atom-mount-host)
+        flaky (-> (spec "flaky" "make-flaky-init")
+                  (assoc :addon/init-retry {:max-attempts 3
+                                            :initial-delay-ms 0
+                                            :max-delay-ms 0
+                                            :backoff-factor 2}))
+        report (boundary/mount! (solve/solve [flaky]) host)
+        result (result-for report "flaky")]
+    (is (false? (:ok? report)))
+    (is (= 3 (:init-attempts result)))
+    (is (= 3 (get @init-calls "flaky")))
+    (is (= ["not ready 3"] (:errors result)))
+    (is (contains? (:skipped report) "flaky"))))
+
+(deftest init-default-remains-single-attempt
+  (let [host (port/atom-mount-host)
+        report (boundary/mount! (solve/solve [(spec "flaky" "make-flaky-init")]) host)
+        result (result-for report "flaky")]
+    (is (false? (:success? result)))
+    (is (= 1 (:init-attempts result)))
+    (is (= 1 (get @init-calls "flaky")))))
+
+(deftest event-sink-failure-does-not-break-mount
+  (let [host (port/atom-mount-host)
+        report (boundary/mount! (solve/solve [(spec "ok" "make-ok-addon")]) host
+                                {:on-event (fn [_] (throw (ex-info "logger down" {})))})]
+    (is (:ok? report))))
+
+(deftest invalid-retry-policy-is-a-config-failure
+  (let [host (port/atom-mount-host)
+        bad (assoc (spec "bad" "make-ok-addon")
+                   :addon/init-retry {:max-attempts 0})
+        report (boundary/mount! (solve/solve [bad]) host)
+        result (result-for report "bad")]
+    (is (false? (:success? result)))
+    (is (= :config (:phase result)))
+    (is (re-find #"max-attempts" (first (:errors result))))))
 
 ;; ---------------------------------------------------------------------------
 ;; dry-run golden-replay parity
