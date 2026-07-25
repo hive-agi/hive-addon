@@ -3,7 +3,7 @@
 
         ;; hive-dsl — Result monad, rescue/guard DSL, error taxonomy.
         ;; Maven coord (on Clojars) so hive-addon's published pom is self-contained.
-        io.github.hive-agi/hive-dsl {:mvn/version "0.5.2"}
+        io.github.hive-agi/hive-dsl {:mvn/version "0.5.7"}
 
         ;; malli — schema layer for the IAddon contract (self-contained; no hive-spi).
         ;; The addon bounded context owns its own schemas (DDD). House pin: 0.20.1.
