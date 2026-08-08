@@ -14,7 +14,8 @@
             [hive-addon.mount.compose :as compose]
             [hive-addon.mount.port :as port]
             [hive-addon.mount.schema :as schema]
-            [hive-addon.mount.solve :as solve]))
+            [hive-addon.mount.solve :as solve]
+            [hive-addon.mount.entitlement :as ent]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -116,6 +117,26 @@
 (def compose!
   "hive-addon.mount.compose/compose! — select+order+mount! into a host."
   compose/compose!)
+
+(def install-gate!
+  "hive-addon.mount.entitlement/install-gate! — install this host's licence gate."
+  ent/install-gate!)
+
+(def installed-gate
+  "hive-addon.mount.entitlement/installed-gate — the gate mount! defaults to."
+  ent/installed-gate)
+
+(def reset-gate!
+  "hive-addon.mount.entitlement/reset-gate! — restore the closed default."
+  ent/reset-gate!)
+
+(def open-gate
+  "hive-addon.mount.entitlement/open-gate — permits everything; development only."
+  ent/open-gate)
+
+(def gated?
+  "hive-addon.mount.entitlement/gated? — does this spec require a licence gate."
+  ent/gated?)
 
 (def read-layers
   "hive-addon.mount.compose/read-layers — paths -> validated plug layers."

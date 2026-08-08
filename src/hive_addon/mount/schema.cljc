@@ -19,7 +19,8 @@
             [malli.error :as me]
             [malli.registry :as mr]
             [hive-addon.schema :as s]
-            [hive-dsl.result :as r]))
+            [hive-dsl.result :as r]
+            [hive-addon.plug.schema :as ps]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -42,6 +43,10 @@
   "The declarative mount manifest value object — a data description of an addon
    to mount (identity, constructor coordinates, deps, capabilities). Reuses
    hive-addon.schema value objects for :addon/id, :addon/type, :addon/capabilities.
+
+   :addon/trust-class defaults to :foss when absent; :proprietary makes the
+   spec gated, and a gated spec mounts only through a licence gate.
+   :addon/entitlement names the unit a gate checks the licence against.
    Open."
   [:map {:closed false}
    [:addon/id s/AddonId]
@@ -57,7 +62,9 @@
    [:addon/init-retry {:optional true} InitRetryPolicy]
    [:addon/description {:optional true} [:maybe :string]]
    [:addon/author {:optional true} [:maybe :string]]
-   [:addon/license {:optional true} [:maybe :string]]])
+   [:addon/license {:optional true} [:maybe :string]]
+   [:addon/trust-class {:optional true :default :foss} ps/TrustClass]
+   [:addon/entitlement {:optional true} [:maybe [:string {:min 1}]]]])
 
 (def MountPlan
   "Pure output of solve — the ordered mount plan plus diagnostics as data. No
@@ -74,14 +81,24 @@
 
 (def MountResult
   "Per-addon mount outcome. :phase records how far the addon got; :success?
-   whether that addon mounted; :errors the accumulated failure strings. Open."
+   whether that addon mounted; :errors the accumulated failure strings.
+
+   :entitlement is the earliest phase: a refused spec never has its constructor
+   namespace loaded. Open."
   [:map {:closed false}
    [:addon/id s/AddonId]
    [:success? :boolean]
-   [:phase [:enum :config :resolved :registered :initialized :skipped :failed]]
+   [:phase [:enum :entitlement :config :resolved :registered :initialized :skipped :failed]]
    [:errors {:optional true} [:sequential :string]]
+   [:deny/reason {:optional true} :keyword]
    [:init-attempts {:optional true} [:int {:min 1}]]
-   [:already-initialized? {:optional true} :boolean]])
+   [:already-initialized? {:optional true} :boolean]
+   [:constructor/status {:optional true} [:enum :resolved :absent :failed :invalid]]
+   [:constructor/symbol {:optional true} :string]
+   [:constructor/error {:optional true} :string]
+   [:constructor/exception {:optional true} :string]
+   [:constructor/cause {:optional true} :string]
+   [:constructor/cause-message {:optional true} :string]])
 
 (def MountReport
   "Aggregate outcome of mounting a plan. :ok? is true only when every attempted
