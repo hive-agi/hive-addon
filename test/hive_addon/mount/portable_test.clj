@@ -40,22 +40,25 @@
    - hive-addon.protocol and hive-addon.mount.port. Both are malli-free and load
      on all three hosts, but neither can be EXERCISED on cljrs: their whole job
      is hosting IAddon implementations, and cljrs cannot implement a protocol
-     from another namespace ([CLJRS-PROTOCOL-XNS]) — the same limitation that
-     puts the IMountDriver leg in oracle_driver.cljc. mount.port's records were
-     nonetheless fixed to read fields through `this`, so they are ready the day
-     that lands.
+     from another namespace — the same limitation that puts the IMountDriver leg
+     in oracle_driver.cljc. mount.port's records were nonetheless fixed to read
+     fields through `this`, so they are ready the day that lands.
 
    - Everything whose closure reaches malli: hive-addon.schema, mount.schema,
      plug.schema, capability, plug, mount.entitlement. The obstacle is NOT the
      Maven coordinate — laying malli's own source on the classpath does not
-     help, because malli does not load on either host:
+     help, because malli does not load on either host, and on cljrs the blocker
+     is a CHAIN rather than a single defect:
        cljw  — malli.core, malli.registry and malli.impl.regex all load;
                malli.util fails to resolve `get`, which its ns form excludes
                from clojure.core and defines itself, and malli.error requires
                malli.util.
-       cljrs — malli.impl.regex fails at `(defprotocol ^:private Driver ...)`;
-               cljrs rejects metadata on a protocol name, which takes malli.core
-               with it.
+       cljrs — `(defprotocol ^:private Driver ...)` was rejected; that is now
+               fixed upstream, and malli.impl.regex advances to the next link:
+               `deftype` is unimplemented, and after that the namespace's hash
+               sits in a `#?(:bb/:clj/:cljs)` with no `:default`, which elides
+               on cljrs entirely. So this is a feature project, not a patch.
+
      That bounds the RUNTIME closure only. Schemas remain a JVM-side boundary
      layer, so hive-schemas coverage of these subjects is unaffected — see
      hive-addon.plug.portable-trifecta-test and
