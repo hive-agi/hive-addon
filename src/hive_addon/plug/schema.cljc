@@ -78,13 +78,62 @@
    [:iaddon/lock         {:optional true} :any]
    [:iaddon/module       {:optional true} [:or :keyword :string]]])
 
+;; =============================================================================
+;; Lint findings, and the arglists of the portable plug subjects
+;; =============================================================================
+
+(def LintRule
+  "Rule ids `hive-addon.plug.lint` can report. A CLOSED set on purpose: the rule
+   chain is fixed here, and a lint result naming an unregistered rule is a bug
+   rather than an extension point."
+  [:enum :literal-secret :ambiguous-source :source-family-mismatch :mutable-tag])
+
+(def Violation
+  "One lint finding. The subject key varies by rule — :lib, :repo or :credential
+   — so exactly one of them is present alongside the rule and its detail."
+  [:map {:closed false}
+   [:rule LintRule]
+   [:detail [:string {:min 1}]]
+   [:lib        {:optional true} LibSym]
+   [:repo       {:optional true} :any]
+   [:credential {:optional true} :any]])
+
+(def Violations [:sequential Violation])
+
+(def LintArgs
+  "Arglist of hive-addon.plug.lint/check. A :cat schema, so a schema-driven test
+   APPLIES the subject rather than handing it the vector as one argument."
+  [:cat IaddonConfig])
+
+(def CoordSourceArgs
+  "Arglist of hive-addon.plug.source/coord->source. Deliberately :any rather
+   than Source: the function's whole job is to CLASSIFY an arbitrary coord map
+   and answer nil for one it does not recognize, so constraining the input to
+   already-valid coords would remove the case under test."
+  [:cat [:map-of :any :any]])
+
+(def DeepMergeArgs
+  "Arglist of hive-addon.plug.merge/deep-merge, stated at its BINARY arity.
+
+   The function is variadic, but a `[:* ...]` tail cannot be driven by a
+   schema-derived argument generator (it has no fixed arity to build a tuple
+   from). The binary case carries the whole relation — deep-merge is a fold of
+   it — and the variadic fold plus nil-dropping are covered by the structured
+   properties in hive-addon.plug.portable-trifecta-test.
+
+   `:maybe` is deliberate: nil is meaningful input, dropped rather than merged."
+  [:cat [:maybe [:map-of :any :any]] [:maybe [:map-of :any :any]]])
+
 (def ^:private plug-schemas
   {:iaddon/lib-sym LibSym :iaddon/addon-id AddonId :iaddon/trust-class TrustClass
    :iaddon/source Source :iaddon/verify Verify :iaddon/plug Plug :iaddon/plugs Plugs
    :iaddon/repos Repos :iaddon/cred-step CredStep :iaddon/cred-def CredDef
    :iaddon/credentials Credentials :iaddon/capability-rule CapabilityRule
    :iaddon/capabilities Capabilities :iaddon/trust-config Trust
-   :iaddon/profile Profile :iaddon/profiles Profiles :iaddon/config IaddonConfig})
+   :iaddon/profile Profile :iaddon/profiles Profiles :iaddon/config IaddonConfig
+   :iaddon/lint-rule LintRule :iaddon/violation Violation
+   :iaddon/violations Violations :iaddon/lint-args LintArgs
+   :iaddon/coord-source-args CoordSourceArgs :iaddon/deep-merge-args DeepMergeArgs})
 
 (def registry
   (mr/composite-registry (m/default-schemas) (mr/registry plug-schemas)))
