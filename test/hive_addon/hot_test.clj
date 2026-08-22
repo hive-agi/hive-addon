@@ -534,3 +534,35 @@
     (is (every? #(satisfies? strategy/IReloadStrategy %) (hot/installed-strategies)))
     (is (= [:restart-required :in-place :inert :remount]
            (mapv strategy/-strategy-id (hot/installed-strategies))))))
+
+;; =============================================================================
+;; Misplaced mount options must not be silently dropped
+;; =============================================================================
+
+(deftest a-top-level-mount-option-is-folded-not-ignored
+  (testing ":resolve-config passed at the top level still reaches mount!"
+    ;; The live failure this guards: hive-mcp's tool passed :resolve-config at
+    ;; the top level instead of under :mount-opts. mount! silently fell back to
+    ;; resolve-config-default, so the remounted addon lost its config.edn merge
+    ;; and its :runtime/ports — coming back :active, :success? true, and
+    ;; DEGRADED, with its whole MCP subdomain gone.
+    (let [[host _] (mount-chain!)
+          seen (atom [])
+          resolver (fn [spec] (swap! seen conj (:addon/id spec)) {:probe/marker true})
+          report (hot/reload-addon! host chain-specs "probe.a"
+                                    {:resolve-config resolver
+                                     :reload-ns! (fn [nss] {:loaded nss})})]
+      (is (:ok? report) (pr-str (:errors report)))
+      (is (= ["probe.a" "probe.b" "probe.c"] @seen)
+          "the custom resolver must have been consulted for every remounted addon")
+      (testing "and the config it returned actually reached the addon"
+        (is (true? (:probe/marker (:config (port/registered host "probe.a")))))))))
+
+(deftest an-explicit-mount-opts-entry-wins-over-a-stray-one
+  (let [[host _] (mount-chain!)
+        report (hot/reload-addon! host chain-specs "probe.a"
+                                  {:resolve-config (fn [_] {:probe/from :stray})
+                                   :mount-opts {:resolve-config (fn [_] {:probe/from :explicit})}
+                                   :reload-ns! (fn [nss] {:loaded nss})})]
+    (is (:ok? report) (pr-str (:errors report)))
+    (is (= :explicit (:probe/from (:config (port/registered host "probe.a")))))))

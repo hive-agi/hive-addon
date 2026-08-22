@@ -101,20 +101,37 @@
 ;; Context
 ;; =============================================================================
 
+(def mount-opt-keys
+  "Keys that belong to boundary/mount!, not to a reload's own options.
+
+   A caller that passes one of these at the TOP level of reload opts means it
+   for mount!. Silently ignoring it is the worst available outcome: mount! falls
+   back to resolve-config-default, the addon still constructs, still initializes
+   and still reports :success? true — while coming back DEGRADED, missing the
+   config.edn merge and whatever host adapters its real config carried. Measured
+   in hive-mcp: a remount that lost :resolve-config left hive.carto :active with
+   zero runtime ports and silently dropped its whole MCP subdomain.
+
+   So they are FOLDED into :mount-opts rather than dropped."
+  #{:resolve-config :init-retry :license-gate :on-event :sleep-fn :peer-specs})
+
 (defn- reload-ctx
   [host specs spec seeds {:keys [trigger changed-ns ns-reloaded? mount-opts
-                                 solve-opts strategies reload-ns!]}]
-  {:hot/host host
-   :hot/specs specs
-   :hot/seeds seeds
-   :hot/source (source/spec-source spec)
-   :hot/trigger (or trigger :manual)
-   :hot/changed-ns changed-ns
-   :hot/ns-reloaded? (boolean ns-reloaded?)
-   :hot/mount-opts (or mount-opts {})
-   :hot/solve-opts (or solve-opts {})
-   :hot/strategies strategies
-   :hot/reload-ns! (or reload-ns! (ns-reloader))})
+                                 solve-opts strategies reload-ns!]
+                          :as opts}]
+  (let [stray (select-keys opts mount-opt-keys)]
+    {:hot/host host
+     :hot/specs specs
+     :hot/seeds seeds
+     :hot/source (source/spec-source spec)
+     :hot/trigger (or trigger :manual)
+     :hot/changed-ns changed-ns
+     :hot/ns-reloaded? (boolean ns-reloaded?)
+     ;; stray FIRST so an explicit :mount-opts entry still wins.
+     :hot/mount-opts (merge stray (or mount-opts {}))
+     :hot/solve-opts (or solve-opts {})
+     :hot/strategies strategies
+     :hot/reload-ns! (or reload-ns! (ns-reloader))}))
 
 (defn- not-found-report
   [addon-id opts]
