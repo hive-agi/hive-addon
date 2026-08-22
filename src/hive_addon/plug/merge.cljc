@@ -8,7 +8,17 @@
 (defn deep-merge
   "Recursively merge maps: later wins per key, nested maps recurse, others replace."
   [& maps]
-  (letfn [(m2 [a b] (if (and (map? a) (map? b)) (merge-with m2 a b) b))]
+  ;; `reduce-kv` rather than `merge-with`: cljrs has no `merge-with` binding, and
+  ;; it fails at CALL rather than at load, so the namespace imports cleanly and
+  ;; dies the first time a config is merged. This says the same thing —
+  ;; merge-with applies its fn only where the key is present in both.
+  (letfn [(m2 [a b]
+            (if (and (map? a) (map? b))
+              (reduce-kv (fn [acc k v]
+                           (assoc acc k (if (contains? acc k) (m2 (get acc k) v) v)))
+                         a
+                         b)
+              b))]
     (reduce m2 nil (remove nil? maps))))
 
 (defn- union-required

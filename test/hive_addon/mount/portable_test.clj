@@ -24,8 +24,32 @@
 (def ^:private src-root "src")
 
 (def roots
-  "The hot-reload core. Everything these reach, transitively, is portable."
-  '#{hive-addon.hot.strategy hive-addon.hot.port hive-addon.hot.cascade})
+  "The portable ENTRY POINTS. Everything these reach, transitively, is the
+   portable stratum and is bound by the rules below.
+
+   This list is exactly the set of namespaces test/portable/oracle.cljc
+   exercises, and that correspondence is the whole discipline: a namespace is
+   admitted here only once its BEHAVIOUR has been shown identical on the JVM,
+   cljw and cljrs. Merely loading on all three is a strictly weaker fact —
+   hive-addon.mount.solve loaded and ran on cljrs while returning a wrong mount
+   order, and hive-addon.plug.merge loaded on cljrs and threw on first call. So
+   do not add a root here to express an intention; add it when the oracle covers
+   it.
+
+   Deliberately absent, for reasons that are not fixable by editing this vector:
+   anything whose closure reaches malli (hive-addon.schema, mount.schema,
+   plug.schema, capability, plug, mount.entitlement) — cljw resolves only
+   :git/url and :local/root coords, so a Maven-only dep is simply not there —
+   and hive-addon.cli, whose coercion hook is a host lookup that wants to become
+   an injected port before it can be portable."
+  '#{hive-addon.hot.strategy
+     hive-addon.hot.port
+     hive-addon.hot.cascade
+     hive-addon.plug.lint
+     hive-addon.plug.merge
+     hive-addon.plug.source
+     hive-addon.cli.tree
+     hive-addon.cli.response})
 
 ;; =============================================================================
 ;; Reading the stratum off disk
@@ -134,6 +158,59 @@
      forms)
     @hits))
 
+(defn bare-record-fields
+  "Every [RecordName field] where a `defrecord` method body reads a field as a
+   BARE SYMBOL.
+
+   cljrs does not bind a record's fields inside its method bodies — it answers
+   `unbound symbol: sha` — while `(:sha this)` works on every host. This is the
+   house OCP idiom (a protocol plus records for each open seam), so the bare
+   form is both the natural thing to write and the thing that breaks.
+
+   A method PARAMETER may legitimately share a field's name and does shadow it
+   correctly, so each method is scanned for its own fields MINUS its parameters
+   rather than for the record's whole field set."
+  [forms]
+  (let [hits (atom [])]
+    (walk/postwalk
+     (fn [x]
+       (when (and (seq? x) (= 'defrecord (first x)) (vector? (nth x 2 nil)))
+         (let [rec-name (nth x 1)
+               fields   (set (nth x 2))]
+           (doseq [m (drop 3 x)
+                   :when (and (seq? m) (vector? (second m)))]
+             (let [params  (set (filter symbol? (second m)))
+                   visible (into #{} (remove params) fields)]
+               (walk/postwalk
+                (fn [y]
+                  (when (and (symbol? y) (contains? visible y))
+                    (swap! hits conj [rec-name y]))
+                  y)
+                (drop 2 m))))))
+       x)
+     forms)
+    (distinct @hits)))
+
+(defn self-shadowing-params
+  "Every `defn`/`defn-` whose parameter vector contains the function's OWN name.
+
+   On cljrs the self-reference binding wins over such a parameter, so the body
+   sees the FUNCTION rather than the argument — `(defn text [text] ...)`
+   returned `{:text #<Fn text>}`. A parameter named after any other var shadows
+   correctly, and so does a `let`; only this collision breaks."
+  [forms]
+  (let [hits (atom [])]
+    (walk/postwalk
+     (fn [x]
+       (when (and (seq? x) (contains? '#{defn defn-} (first x)) (symbol? (second x)))
+         (let [fn-name (second x)]
+           (doseq [param (filter vector? x)]
+             (when (some #(= fn-name %) param)
+               (swap! hits conj fn-name)))))
+       x)
+     forms)
+    (distinct @hits)))
+
 ;; =============================================================================
 ;; Tests
 ;; =============================================================================
@@ -167,17 +244,51 @@
           (str ns " has a non-self-evaluating :or default; cljrs binds the default"
                " UNEVALUATED — use (or x default) in the body")))))
 
+(deftest portable-stratum-reads-no-bare-record-fields
+  (doseq [ns (portable-nses)]
+    (testing (str ns)
+      (is (empty? (bare-record-fields (get-in @index [ns :forms])))
+          (str ns " reads a defrecord field as a bare symbol; cljrs does not bind"
+               " record fields inside method bodies — use (:field this)")))))
+
+(deftest portable-stratum-has-no-self-shadowing-params
+  (doseq [ns (portable-nses)]
+    (testing (str ns)
+      (is (empty? (self-shadowing-params (get-in @index [ns :forms])))
+          (str ns " has a defn whose parameter shares the function's own name;"
+               " on cljrs the body sees the FUNCTION, not the argument")))))
+
 (deftest rules-are-discriminating
-  (testing "each predicate fires on a namespace known to violate it, so a green
-            stratum is evidence rather than a vacuous pass"
+  (testing "each rule fires on code known to violate it, so a green stratum is
+            evidence rather than a vacuous pass"
     (let [forms-of (fn [ns] (get-in @index [ns :forms]))]
-      (is (pos? (reader-conditional-count (forms-of 'hive-addon.schema)))
-          "hive-addon.schema has #?(:clj ...) host interop")
-      (is (seq (for-bindings (forms-of 'hive-addon.plug)))
-          "hive-addon.plug uses `for`")
-      (is (seq (unevaluated-or-defaults (forms-of 'hive-addon.mount.boundary)))
-          "hive-addon.mount.boundary has symbol/fn :or defaults")
-      (testing "and none of those three is in the portable stratum"
+      (testing "against real namespaces in this repo"
+        (is (pos? (reader-conditional-count (forms-of 'hive-addon.schema)))
+            "hive-addon.schema has #?(:clj ...) host interop")
+        (is (seq (for-bindings (forms-of 'hive-addon.plug)))
+            "hive-addon.plug uses `for`")
+        (is (seq (unevaluated-or-defaults (forms-of 'hive-addon.mount.boundary)))
+            "hive-addon.mount.boundary has symbol/fn :or defaults")
+        (is (seq (bare-record-fields (forms-of 'hive-addon.mount.port)))
+            "hive-addon.mount.port/AtomMountHost reads its `reg` field bare"))
+
+      ;; The last two rules are also checked against LITERAL forms. A file-based
+      ;; discrimination check quietly stops discriminating the day someone fixes
+      ;; the namespace it points at, and self-shadowing has no violator left in
+      ;; this repo at all — hive-addon.cli.response/text was the only one.
+      (testing "against literal forms, which no future cleanup can erase"
+        (is (= '([R x])
+               (bare-record-fields '[(defrecord R [x] IP (m [_] x))])))
+        (is (empty?
+             (bare-record-fields '[(defrecord R [x] IP (m [this] (:x this)))]))
+            "keyword access on this is the portable form and must not be flagged")
+        (is (empty?
+             (bare-record-fields '[(defrecord R [x] IP (m [x] x))]))
+            "a method PARAMETER may share a field name; it shadows correctly")
+        (is (= '(text) (self-shadowing-params '[(defn text [text] text)])))
+        (is (empty? (self-shadowing-params '[(defn text [content] content)]))))
+
+      (testing "and no violating namespace is in the portable stratum"
         (let [nses (portable-nses)]
           (is (not-any? nses '[hive-addon.schema hive-addon.plug
-                               hive-addon.mount.boundary])))))))
+                               hive-addon.mount.boundary hive-addon.mount.port])))))))

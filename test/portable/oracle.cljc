@@ -3,22 +3,32 @@
 
    Emits one canonical line per observation. The JVM, cljw and cljrs must agree
    LINE FOR LINE; `test/portable/run.sh` runs all three and diffs them. Where
-   hive-addon.mount.portable-test checks the stratum's SOURCE against three
+   hive-addon.mount.portable-test checks the stratum's SOURCE against its
    admission rules, this checks its BEHAVIOUR — the rules exist to keep this
    diff empty, and a rule with no behavioural consequence would be superstition.
 
+   Two sections, both required to pass:
+     - the hot-reload core: solve, cascade, strategy selection, the refusal path
+     - the plug/cli tier:   deep-merge, source classification, lint rules,
+                            command parsing, response shapes
+
    Everything emitted here is canonicalized: sets are sorted, records are
    reduced to their strategy id, and no whole map containing namespaced keys is
-   printed raw. Set iteration order, record print-names and the `#:addon{...}`
-   namespaced-map shorthand are host-dependent and are NOT behaviour — leaving
-   them raw produces diffs that say nothing, which trains the reader to ignore
-   the diff.
+   printed raw. Set iteration order, record print-names (`#hive_addon...` vs
+   `#hive-addon...` vs `#RemountStrategy`) and the `#:addon{...}` namespaced-map
+   shorthand are host-dependent and are NOT behaviour — leaving them raw
+   produces diffs that say nothing, which trains the reader to ignore the diff.
 
    The IMountDriver leg lives in oracle_driver.cljc because cljrs cannot yet
    implement a protocol from another namespace; see that file."
-  (:require [hive-addon.hot.cascade :as cascade]
+  (:require [hive-addon.cli.response :as resp]
+            [hive-addon.cli.tree :as tree]
+            [hive-addon.hot.cascade :as cascade]
             [hive-addon.hot.strategy :as strat]
-            [hive-addon.mount.solve :as solve]))
+            [hive-addon.mount.solve :as solve]
+            [hive-addon.plug.lint :as lint]
+            [hive-addon.plug.merge :as mrg]
+            [hive-addon.plug.source :as src]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -98,5 +108,46 @@
   (emit "refusal/ok?"      (:ok? rep))
   (emit "refusal/affected" (:hot/affected rep))
   (emit "refusal/errors"   (:errors rep)))
+
+
+;; =============================================================================
+;; plug / cli tier
+;; =============================================================================
+
+(defn- rules-of
+  "Violation rule keywords from a lint result, sorted."
+  [res]
+  (vec (sort (map (fn [v] (:rule v)) (:violations res)))))
+
+(emit "deep-merge/flat"    (mrg/deep-merge {:a 1} {:b 2}))
+(emit "deep-merge/nested"  (mrg/deep-merge {:a {:x 1 :y 2}} {:a {:y 9 :z 3}}))
+(emit "deep-merge/replace" (mrg/deep-merge {:a {:x 1}} {:a 5}))
+(emit "deep-merge/deep3"   (mrg/deep-merge {:a {:b {:c 1}}} {:a {:b {:d 2}}}))
+(emit "deep-merge/nils"    (mrg/deep-merge nil {:a 1} nil {:b 2}))
+(emit "deep-merge/order"   (mrg/deep-merge {:a 1} {:a 2} {:a 3}))
+
+;; reads a defrecord FIELD through `this` — the bare field symbol is unbound on cljrs
+(emit "src/families-mvn"   (vec (sort (map str (src/families {:mvn/version "1.0"})))))
+(emit "src/local?"         (boolean (src/local? (src/coord->source {:local/root "/x"}))))
+(emit "src/mutable-branch" (boolean (src/mutable? (src/coord->source {:git/url "u" :git/branch "main"}))))
+(emit "src/mutable-shortsha" (boolean (src/mutable? (src/coord->source {:git/url "u" :git/sha "abc"}))))
+(emit "src/mutable-fullsha"  (boolean (src/mutable? (src/coord->source {:git/url "u" :git/sha "3bd5f82ab12cd34"}))))
+(emit "src/mutable-snapshot" (boolean (src/mutable? (src/coord->source {:mvn/version "1.0-SNAPSHOT"}))))
+
+;; each lint rule was a `for ... :when`; a runtime dropping :when fires on EVERYTHING,
+;; so both the violating and the clean case are load-bearing observations
+(emit "lint/clean"          (rules-of (lint/check {:iaddon/plugs {"a" {:version "1"}}})))
+(emit "lint/plug-secret"    (rules-of (lint/check {:iaddon/plugs {"a" {:password "hunter2"}}})))
+(emit "lint/repo-userinfo"  (rules-of (lint/check {:iaddon/repos {"r" {:url "https://u:p@example.com/x"}}})))
+(emit "lint/repo-clean"     (rules-of (lint/check {:iaddon/repos {"r" {:url "https://example.com/x"}}})))
+(emit "lint/cred-smuggle"   (rules-of (lint/check {:iaddon/credentials {"h" {:chain [[:env "X" {:default "oops"}]]}}})))
+(emit "lint/cred-clean"     (rules-of (lint/check {:iaddon/credentials {"h" {:chain [[:env "X"]]}}})))
+
+(emit "tree/parse"         (tree/parse-command "a b"))
+(emit "tree/normalize"     (tree/normalize-command :foo))
+;; the param name collided with the fn's own name; cljrs returned the FUNCTION here
+(emit "resp/text"          (resp/text "hi"))
+(emit "resp/error"         (resp/error "bad"))
+(emit "resp/error?"        [(resp/error? (resp/error "bad")) (resp/error? (resp/text "hi"))])
 
 (println "ORACLE-END")
