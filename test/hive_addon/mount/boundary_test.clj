@@ -206,6 +206,32 @@
       (is (contains? (:skipped report) "a-nil"))
       (is (ms/validate ms/MountReport report)))))
 
+(deftest constructor-resolution-preserves-load-failure
+  (testing "absent constructor and failed namespace load remain distinct"
+    (let [missing (boundary/resolve-constructor
+                   (spec "missing" "make-does-not-exist"))]
+      (is (= :absent (:constructor/status missing)))
+      (is (= "hive-addon.mount.boundary-test/make-does-not-exist"
+             (:constructor/symbol missing)))
+      (is (re-find #"absent" (:constructor/error missing))))
+    (let [failure (ex-info "Syntax error compiling host protocol"
+                           {:clojure.error/phase :compile-syntax-check}
+                           (ClassNotFoundException. "host.protocol.IAddon"))
+          specs   [(spec "broken" "make-ok-addon")]
+          report  (with-redefs [clojure.core/requiring-resolve
+                                (fn [_] (throw failure))]
+                    (boundary/mount! (solve/solve specs)
+                                     (port/atom-mount-host)))
+          result  (result-for report "broken")]
+      (is (false? (:ok? report)))
+      (is (= :resolved (:phase result)))
+      (is (= :failed (:constructor/status result)))
+      (is (= "clojure.lang.ExceptionInfo" (:constructor/exception result)))
+      (is (= "java.lang.ClassNotFoundException" (:constructor/cause result)))
+      (is (= "host.protocol.IAddon" (:constructor/cause-message result)))
+      (is (re-find #"failed to load" (first (:errors result))))
+      (is (ms/validate ms/MountReport report)))))
+
 (deftest init-retries-with-backoff-and-events
   (let [host (port/atom-mount-host)
         sleeps (atom [])
