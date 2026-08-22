@@ -321,39 +321,55 @@
 ;; IReloadStrategy is NOT re-exported: a protocol cannot be plain-def aliased.
 ;; Implement it from its canonical home, hive-addon.hot.strategy.
 
-(def dependents
+;; Re-exports DELEGATE through the var at call time; they are never plain
+;; `def` aliases. A `def` alias snapshots the function object, so reloading the
+;; namespace it came from leaves this facade calling the PREVIOUS one — which,
+;; for anything protocol-backed, hands back instances of a class the current
+;; protocol has never heard of. That is the same Capture-by-Var defect this
+;; library exists to fix, and in a hot-reload facade it would be self-defeating.
+
+(defn dependents
   "hive-addon.hot.cascade/dependents — transitive dependent closure of seeds."
-  cascade/dependents)
+  ([specs seed-ids] (cascade/dependents specs seed-ids))
+  ([specs seed-ids opts] (cascade/dependents specs seed-ids opts)))
 
-(def affected-plan
+(defn affected-plan
   "hive-addon.hot.cascade/affected-plan — the ordered slice a reload drives."
-  cascade/affected-plan)
+  ([specs seed-ids] (cascade/affected-plan specs seed-ids))
+  ([specs seed-ids opts] (cascade/affected-plan specs seed-ids opts)))
 
-(def spec-source
+(defn spec-source
   "hive-addon.hot.source/spec-source — where a spec's constructor ns lives."
-  source/spec-source)
+  [spec]
+  (source/spec-source spec))
 
-(def watchable-dirs
+(defn watchable-dirs
   "hive-addon.hot.source/watchable-dirs — the :local/root source dirs to watch."
-  source/watchable-dirs)
+  [specs]
+  (source/watchable-dirs specs))
 
-(def register-strategy!
+(defn register-strategy!
   "hive-addon.hot.strategy/register-strategy! — OCP: add a reload strategy."
-  strategy/register-strategy!)
+  [strategy]
+  (strategy/register-strategy! strategy))
 
-(def install-strategies!
+(defn install-strategies!
   "hive-addon.hot.strategy/install-strategies! — replace the strategy chain."
-  strategy/install-strategies!)
+  [strategies]
+  (strategy/install-strategies! strategies))
 
-(def installed-strategies
+(defn installed-strategies
   "hive-addon.hot.strategy/installed-strategies — the live strategy chain."
-  strategy/installed-strategies)
+  []
+  (strategy/installed-strategies))
 
-(def reset-strategies!
+(defn reset-strategies!
   "hive-addon.hot.strategy/reset-strategies! — restore the built-in chain."
-  strategy/reset-strategies!)
+  []
+  (strategy/reset-strategies!))
 
-(def default-strategies
-  "hive-addon.hot.strategy/default-strategies — (fn [] chain) rebuilding the
-   built-in strategies against the CURRENT protocol var."
-  strategy/default-strategies)
+(defn default-strategies
+  "hive-addon.hot.strategy/default-strategies — a FRESH built-in chain, rebuilt
+   against the current protocol var."
+  []
+  (strategy/default-strategies))

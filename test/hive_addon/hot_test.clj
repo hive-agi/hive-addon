@@ -507,3 +507,30 @@
                                     {:reload-ns! (fn [nss] {:loaded nss})})]
       (is (:ok? report) (pr-str (:errors report)))
       (is (= ["probe.a" "probe.b" "probe.c"] @calls)))))
+
+;; =============================================================================
+;; The facade's own Capture-by-Var exposure
+;; =============================================================================
+
+(deftest facade-re-exports-resolve-through-the-var-not-a-snapshot
+  (testing "a plain `def` alias captures the function object and ignores a rebind"
+    ;; This is the shape that broke live: hive-addon.hot re-exported
+    ;; strategy/installed-strategies with `def`, so reloading
+    ;; hive-addon.hot.strategy left the facade calling the PREVIOUS fn, which
+    ;; returned records built against the PREVIOUS protocol var — and every
+    ;; call through the facade then threw "No implementation of method
+    ;; :-strategy-id ... for class RestartRequiredStrategy".
+    (with-redefs [strategy/installed-strategies (fn [] [::sentinel])]
+      (is (= [::sentinel] (hot/installed-strategies))))
+    (with-redefs [strategy/default-strategies (fn [] [::fresh])]
+      (is (= [::fresh] (hot/default-strategies))))
+    (with-redefs [cascade/dependents (fn [_ _] #{::closure})]
+      (is (= #{::closure} (hot/dependents chain-specs #{"probe.a"}))))
+    (with-redefs [source/watchable-dirs (fn [_] #{"/sentinel"})]
+      (is (= #{"/sentinel"} (hot/watchable-dirs chain-specs))))))
+
+(deftest facade-still-returns-live-protocol-satisfying-strategies
+  (testing "the chain reached through the facade satisfies the CURRENT protocol"
+    (is (every? #(satisfies? strategy/IReloadStrategy %) (hot/installed-strategies)))
+    (is (= [:restart-required :in-place :inert :remount]
+           (mapv strategy/-strategy-id (hot/installed-strategies))))))
