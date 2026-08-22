@@ -72,7 +72,13 @@
         (satisfies? ILicenseGate gate) (permit? gate spec)
         (ifn? gate) (gate spec)
         :else :deny/no-license-gate)
-      (catch #?(:clj Throwable :cljs :default) _ :deny/gate-error))))
+      ;; TOTAL reader conditional: :clj covers the JVM and cljw (both have
+      ;; Throwable), :default covers cljs and cljrs. The previous
+      ;; `#?(:clj Throwable :cljs :default)` matched NEITHER feature on cljrs,
+      ;; so the catch clause vanished and a throwing gate would have escaped as
+      ;; an exception instead of becoming :deny/gate-error — a licence gate
+      ;; failing open is the one outcome this fn exists to prevent.
+      (catch #?(:clj Throwable :default :default) _ :deny/gate-error))))
 
 (def TrustClass
   "Re-exported so a MountSpec can state its trust class without reaching into

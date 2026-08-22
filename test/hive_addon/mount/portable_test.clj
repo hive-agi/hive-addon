@@ -12,6 +12,7 @@
    behavioural evidence is test/portable/oracle.cljc, which the three runtimes
    must answer line-for-line identically."
   (:require [clojure.java.io :as io]
+            [clojure.set]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [clojure.walk :as walk])
@@ -77,6 +78,37 @@
      hive-addon.registry.commands
      hive-addon.registry.schema})
 
+(def schema-roots
+  "The SCHEMA TIER — portable to the JVM and cljw, but not cljrs.
+
+   Everything here reaches malli, so it is a TWO-host claim, pinned by
+   test/portable/oracle_schema.cljc rather than by portable.oracle. It is
+   separated for the same reason the IMountDriver leg is: a diff that can never
+   be empty teaches the reader to ignore diffs.
+
+   cljrs is the only thing missing, and for a reason outside this repo:
+   malli.impl.regex needs `deftype`, which cljrs does not implement. The
+   hive-addon code itself is ready — two defects here were fixed to get cljw
+   running, and both were the kind this file exists to catch:
+     hive-addon.schema        matched an exception CLASS (`AbstractMethodError`)
+                              inside #?(:clj ...), which cljw TAKES because it
+                              presents :clj. Now detects by message.
+     mount.entitlement        used a NON-TOTAL #?(:clj Throwable :cljs :default)
+                              in a catch, which matches neither feature on cljrs
+                              — the clause would vanish and a throwing licence
+                              gate would escape instead of denying.
+
+   These namespaces may carry reader conditionals (they cannot avoid a catch
+   class), so the zero-conditionals rule does not apply to them. The TOTALITY
+   rule does, and it is the one that matters."
+  '#{hive-addon.schema
+     hive-addon.mount.schema
+     hive-addon.plug.schema
+     hive-addon.capability
+     hive-addon.plug
+     hive-addon.mount.entitlement})
+
+
 ;; =============================================================================
 ;; Reading the stratum off disk
 ;; =============================================================================
@@ -130,6 +162,20 @@
   []
   (let [idx @index]
     (into (sorted-set) (filter idx) (closure idx roots))))
+
+(defn schema-tier-nses
+  "Namespaces the schema tier OWNS — its closure minus the three-host stratum.
+
+   The subtraction matters: `hive-addon.plug` requires plug.lint/merge/source,
+   which are already three-host namespaces, so the raw closure overlaps. Each
+   namespace must be governed by exactly one rule set, and the stricter one
+   wins — a shared namespace stays a three-host claim."
+  []
+  (let [idx @index
+        three-host (portable-nses)]
+    (into (sorted-set)
+          (comp (filter idx) (remove three-host))
+          (closure idx schema-roots))))
 
 ;; =============================================================================
 ;; The three admission rules
@@ -237,6 +283,30 @@
      forms)
     (distinct @hits)))
 
+(defn non-total-reader-conditionals
+  "Every reader conditional in `forms` that has NO `:default` branch.
+
+   A total `#?` is the one shape that is safe across these hosts — `:clj`
+   selects the JVM AND cljw (both have Throwable), `:default` catches cljs and
+   cljrs (which presents `:rust`). A NON-total one silently ELIDES on any host
+   whose feature is unlisted, and elision is the dangerous outcome: an omitted
+   catch clause turns a handled refusal into a propagating exception, and an
+   omitted expression turns a binding into an unbound symbol.
+
+   Returns the clause list of each offender, so a failure names the form."
+  [forms]
+  (let [hits (atom [])]
+    (walk/postwalk
+     (fn [x]
+       (when (instance? clojure.lang.ReaderConditional x)
+         (let [clauses (:form x)
+               features (take-nth 2 clauses)]
+           (when-not (some #(= :default %) features)
+             (swap! hits conj (vec clauses)))))
+       x)
+     forms)
+    @hits))
+
 ;; =============================================================================
 ;; Tests
 ;; =============================================================================
@@ -283,6 +353,59 @@
       (is (empty? (self-shadowing-params (get-in @index [ns :forms])))
           (str ns " has a defn whose parameter shares the function's own name;"
                " on cljrs the body sees the FUNCTION, not the argument")))))
+
+(deftest schema-tier-obeys-the-portability-rules
+  (testing "every reader conditional in the schema tier is TOTAL"
+    ;; This is the rule that governs a JVM+cljw claim, and it is the one that
+    ;; was actually violated: mount.entitlement's catch was
+    ;; #?(:clj Throwable :cljs :default), which matches neither feature on a
+    ;; host presenting :rust. An elided catch clause turns a licence-gate
+    ;; refusal into a propagating exception.
+    (doseq [ns (schema-tier-nses)]
+      (is (empty? (non-total-reader-conditionals (get-in @index [ns :forms])))
+          (str ns " has a reader conditional with no :default branch"))))
+
+  (testing "the cljrs-specific rules are deliberately NOT applied here"
+    ;; `for`, non-self-evaluating :or defaults, bare record fields and
+    ;; self-shadowing params are all cljrs divergences. cljw handles every one
+    ;; of them exactly as the JVM does — measured, not assumed — so enforcing
+    ;; them on a tier that cannot reach cljrs anyway would be cargo cult, and
+    ;; would fail today on hive-addon.plug's three `for` comprehensions for no
+    ;; reachable benefit.
+    ;;
+    ;; This testing block is the REMINDER: if cljrs ever implements `deftype`
+    ;; and this tier becomes a three-host claim, these namespaces must be moved
+    ;; into `roots` and will then have to satisfy the full rule set.
+    (is (seq (for-bindings (get-in @index ['hive-addon.plug :forms])))
+        "hive-addon.plug still uses `for` — this assertion exists so the day it
+         stops being true, someone re-reads why the rule was skipped")))
+
+(deftest the-three-host-stratum-is-stricter-than-the-schema-tier
+  (testing "zero reader conditionals in the three-host stratum, not merely total
+            ones — it has no catch-class problem to solve, so the stronger rule
+            costs nothing and keeps the host-interop door shut"
+    (doseq [ns (portable-nses)]
+      (is (zero? (reader-conditional-count (get-in @index [ns :forms]))) (str ns))))
+
+  (testing "and every namespace is governed by exactly one rule set"
+    (is (empty? (clojure.set/intersection (set (portable-nses))
+                                          (set (schema-tier-nses))))
+        "schema-tier-nses subtracts the three-host stratum, so a shared
+         namespace stays a three-host claim rather than being governed twice")
+    (is (seq (schema-tier-nses))
+        "the schema tier must not be empty — an empty set would satisfy every
+         rule above vacuously")))
+
+(deftest totality-rule-is-discriminating
+  (testing "non-total conditionals are flagged and total ones are not"
+    (is (seq (non-total-reader-conditionals
+              (read-string {:read-cond :preserve} "(try x (catch #?(:clj Throwable :cljs :default) t t))")))
+        "the shape that bit mount.entitlement must be caught")
+    (is (empty? (non-total-reader-conditionals
+                 (read-string {:read-cond :preserve} "(try x (catch #?(:clj Throwable :default :default) t t))")))
+        "the total shape must pass")
+    (is (seq (non-total-reader-conditionals
+              (read-string {:read-cond :preserve} "#?(:clj 1)"))))))
 
 (deftest rules-are-discriminating
   (testing "each rule fires on code known to violate it, so a green stratum is

@@ -22,7 +22,17 @@ root="$(cd "$here/../.." && pwd)"
 SRC="$root/src"
 TEST="$root/test"
 DSL="${HIVE_DSL_SRC:-$root/../hive-dsl/src}"
-CLJW="${CLJW:-$(command -v cljw || true)}"
+# Prefer a repo-built cljw over whatever is on PATH. A STALE cljw is the worst
+# outcome here: it silently answers for a version nobody is shipping, and every
+# "identical" line it produces is evidence about the wrong binary. This bit us —
+# a brew cljw 16 patch versions behind PATH-shadowed the current build and made
+# a long-fixed macro-hygiene bug look like an open blocker.
+CLJW="${CLJW:-}"
+if [ -z "$CLJW" ]; then
+  for cand in "$root/../../ClojureWasm/zig-out/bin/cljw" "$(command -v cljw || true)"; do
+    [ -x "$cand" ] && { CLJW="$cand"; break; }
+  done
+fi
 CLJRS="${CLJRS:-$(command -v cljrs || true)}"
 
 [ -d "$DSL" ] || { echo "hive-dsl source not found at $DSL; set HIVE_DSL_SRC" >&2; exit 2; }
@@ -40,6 +50,9 @@ run_host () { # name command...
   mv "$out/$name.clean" "$out/$name"
 }
 
+[ -n "$CLJW" ]  && echo "cljw : $("$CLJW" --version 2>&1 | head -1)  [$CLJW]"
+[ -n "$CLJRS" ] && echo "cljrs: $("$CLJRS" --version 2>&1 | head -1)  [$CLJRS]"
+echo
 echo "== portable.oracle =="
 run_host jvm   clojure -Sdeps "{:paths [\"$SRC\" \"$DSL\" \"$TEST\"]}" -M -e "(require 'portable.oracle)"
 [ -n "$CLJW" ]  && run_host cljw  "$CLJW"  -cp "$CP" "$here/oracle.cljc"
@@ -69,6 +82,27 @@ if [ -f "$out/cljw-drv" ]; then
   else
     echo "FAIL jvm != cljw (driver leg)"; cat "$out/drv.diff"; status=1
   fi
+fi
+
+echo
+echo "== portable.oracle-schema (JVM + cljw; cljrs blocked on deftype) =="
+# cljw resolves :git/url + :local/root only, so malli must be on the classpath as
+# SOURCE. Discover the cljw gitlib checkout; skip the leg (loudly) if absent —
+# silently skipping is how a stale/absent arm gets mistaken for a passing one.
+MALLI_SRC="${MALLI_SRC:-$(ls -d "$HOME"/.cljw/gitlibs/malli/*/src 2>/dev/null | head -1)}"
+DYNALOAD_SRC="${DYNALOAD_SRC:-$(ls -d "$HOME"/.cljw/gitlibs/dynaload/*/src 2>/dev/null | head -1)}"
+
+run_host jvm-sch clojure -Sdeps "{:paths [\"$SRC\" \"$DSL\" \"$TEST\"] :deps {metosin/malli {:mvn/version \"0.20.1\"}}}" -M -e "(require 'portable.oracle-schema)"
+if [ -n "$CLJW" ] && [ -d "${MALLI_SRC:-}" ] && [ -d "${DYNALOAD_SRC:-}" ]; then
+  run_host cljw-sch "$CLJW" -cp "$CP:$MALLI_SRC:$DYNALOAD_SRC" "$here/oracle_schema.cljc"
+  for f in jvm-sch cljw-sch; do sed -n '/^ms\//,$p' "$out/$f" > "$out/$f.leg"; done
+  if diff -u "$out/jvm-sch.leg" "$out/cljw-sch.leg" > "$out/sch.diff"; then
+    echo "OK   jvm == cljw (schema leg, $(grep -c '|' "$out/jvm-sch.leg") observations)"
+  else
+    echo "FAIL jvm != cljw (schema leg)"; cat "$out/sch.diff"; status=1
+  fi
+else
+  echo "SKIP cljw schema leg (malli/dynaload source not found; set MALLI_SRC + DYNALOAD_SRC)"
 fi
 
 exit $status

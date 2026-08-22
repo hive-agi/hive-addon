@@ -187,6 +187,25 @@
    [:addon/excluded-tools    #'proto/excluded-tools    ExcludedTools    true]
    [:addon/hooks             #'proto/hooks             HookMap          true]])
 
+(def ^:private unimplemented-method-re
+  "Messages the hosts use for a protocol method that is not implemented.
+
+   Measured 2026-08-22. The JVM alone has TWO phrasings, which is why matching
+   one measured example is not enough — the suite caught the second:
+     JVM defrecord \"Method p.Partial.b()Ljava/lang/Object; is abstract\"
+     JVM reify     \"Receiver class ...$reify__8710 does not define or inherit an
+                    implementation of the resolved method 'abstract java.lang.Object
+                    excluded_tools()' of interface hive_addon.protocol.IAddon.\"
+     JVM extend-*  \"No implementation of method: :b of protocol: ...\"
+     cljw          \"No implementation of method 'b' on protocol 'IThing' for type 'Partial'\"
+     cljrs         \"runtime error: No implementation of protocol IThing for type Partial\"
+   cljs contributes \"no protocol method\" / \"nothing implements\".
+
+   Matching the message rather than the exception CLASS is what makes this
+   portable: the class name differs per host and `AbstractMethodError` cannot
+   even be named off the JVM."
+  #"(?i)is abstract|does not define or inherit an implementation|no implementation of (method|protocol)|no protocol method|nothing implements")
+
 (defn validate-addon
   "Validate a live IAddon instance's contract OUTPUTS against the schemas.
    Exercises only the pure, non-mutating methods (does NOT call initialize! or
@@ -198,24 +217,34 @@
    omit them, defaulting to #{}/{}); an unimplemented optional method is
    skipped, an unimplemented required method is a violation. Non-implementation
    is recognized for BOTH extension mechanisms: inline deftype/defrecord/reify
-   omission (AbstractMethodError) and extend-*/metadata omission
-   (IllegalArgumentException \"No implementation of method\")."
+   omission and extend-*/metadata omission.
+
+   Detection is by MESSAGE, not by exception class. The class differs per host
+   and naming one is not portable — `AbstractMethodError` does not exist off the
+   JVM, and `#?(:clj ...)` does not select the JVM (cljw presents :clj), so the
+   old class-based branch was TAKEN on cljw and died at analysis. Measured
+   messages for a missing protocol method:
+
+     JVM   \"Method p.Partial.b()Ljava/lang/Object; is abstract\"
+     cljw  \"No implementation of method 'b' on protocol 'IThing' for type ...\"
+     cljrs \"runtime error: No implementation of protocol IThing for type ...\"
+
+   `ex-message` reads all of them (it is defined on Throwable on the JVM), so
+   the whole check is host-free."
   [addon]
   (letfn [(unimplemented? [t]
-            ;; NOTE (JVM): an AbstractMethodError raised from *inside* an
-            ;; implemented method body also reads as unimplemented here — an
-            ;; accepted edge for the optional-method skip.
-            #?(:clj (or (instance? AbstractMethodError t)
-                        (and (instance? IllegalArgumentException t)
-                             (some? (some->> (.getMessage ^Throwable t)
-                                             (re-find #"No implementation of method")))))
-               :cljs (boolean (some->> (ex-message t)
-                                       (re-find #"(?i)no protocol method|nothing implements")))))
-          (err-msg [t] #?(:clj (.getMessage ^Throwable t) :cljs (ex-message t)))]
+            ;; NOTE: a genuine \"is abstract\" / \"no implementation\" error raised
+            ;; from *inside* an implemented method body also reads as
+            ;; unimplemented here — an accepted edge for the optional-method skip.
+            (boolean (some->> (ex-message t) (re-find unimplemented-method-re))))
+          (err-msg [t] (ex-message t))]
     (reduce
      (fn [_acc [k getter sch optional?]]
        (let [call (try {:v (getter addon)}
-                       (catch #?(:clj Throwable :cljs :default) t
+                       ;; TOTAL reader conditional — :clj for the JVM and cljw
+                       ;; (both have Throwable), :default for cljs and cljrs. A
+                       ;; non-total #? would vanish on cljrs and stop catching.
+                       (catch #?(:clj Throwable :default :default) t
                          (if (unimplemented? t) ::unimplemented {:throw t})))]
          (cond
            (and optional? (= call ::unimplemented)) (r/ok addon)
