@@ -1,16 +1,23 @@
 {:paths ["src"]
- :deps {org.clojure/clojure {:mvn/version "1.12.1"}
+ :deps {org.clojure/clojure {:mvn/version "1.12.5"}
 
         ;; hive-dsl — Result monad, rescue/guard DSL, error taxonomy.
         ;; Maven coord (on Clojars) so hive-addon's published pom is self-contained.
-        io.github.hive-agi/hive-dsl {:mvn/version "0.5.7"}
+        io.github.hive-agi/hive-dsl {:mvn/version "0.5.16"}
 
         ;; malli — schema layer for the IAddon contract (self-contained; no hive-spi).
         ;; The addon bounded context owns its own schemas (DDD). House pin: 0.20.1.
         metosin/malli {:mvn/version "0.20.1"}}
 
+ ;; hive-hot is deliberately NOT in :deps. hive-addon.hot resolves it through the
+ ;; var at call time and degrades to :hot/available? false when it is absent, so
+ ;; the published lib stays a three-dep leaf and consumers that want file-watching
+ ;; add hive-hot themselves. It appears below only so dev + the suite can exercise
+ ;; the wired path alongside the graceful-degradation one.
  :aliases
- {:dev  {:extra-paths ["dev" "test"]}
+ {:dev  {:extra-paths ["dev" "test"]
+         :extra-deps  {io.github.hive-agi/hive-hot
+                       {:git/tag "v0.1.6" :git/sha "3bd5f82"}}}
 
   :test {:extra-paths ["test"]
          :extra-deps  {io.github.cognitect-labs/test-runner
@@ -18,11 +25,12 @@
                        ;; test.check — backs the malli.generator generative leg
                        ;; of hive-addon.schema-test (also pulled transitively by
                        ;; malli, pinned here for reproducibility).
-                       org.clojure/test.check {:mvn/version "1.1.1"}}
+                       org.clojure/test.check {:mvn/version "1.1.3"}
+                       io.github.hive-agi/hive-hot
+                       {:git/tag "v0.1.6" :git/sha "3bd5f82"}}
          :main-opts ["-m" "cognitect.test-runner"]
          :exec-fn cognitect.test-runner.api/test}
 
   ;; Build + Clojars deploy: clojure -T:build jar | clojure -T:build deploy
-  :build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.5"}
-                 slipset/deps-deploy {:mvn/version "0.2.2"}}
-          :ns-default build}}}
+  :build {:deps {io.github.hive-agi/hive-build {:mvn/version "0.1.10"}}
+          :ns-default hive-build.api}}}

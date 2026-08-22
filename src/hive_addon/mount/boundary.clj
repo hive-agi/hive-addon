@@ -19,7 +19,8 @@
             [hive-addon.mount.schema :as ms]
             [hive-addon.mount.solve :as solve]
             [hive-addon.protocol :as proto]
-            [hive-dsl.result :as r])
+            [hive-dsl.result :as r]
+            [hive-addon.mount.entitlement :as ent])
   (:import [java.util.jar JarFile]
            [java.net URL]
            [java.io File]))
@@ -114,14 +115,46 @@
 ;; Boundary helpers — constructor resolution + sibling-instance injection
 ;; =============================================================================
 
+(defn- root-cause
+  [^Throwable error]
+  (loop [cause error]
+    (if-let [next-cause (ex-cause cause)]
+      (recur next-cause)
+      cause)))
+
 (defn resolve-constructor
-  "Resolve a MountSpec's :addon/init-ns / :addon/init-fn into a ctor fn via
-   requiring-resolve, or nil if it cannot be resolved. Never throws."
+  "Resolve a MountSpec constructor without erasing load failures.
+
+   Returns tagged resolution data. `:absent` means no such var; `:failed`
+   means requiring the constructor namespace threw (including compiler/load
+   order failures); `:invalid` means the var exists but is not callable.
+   Never throws ordinary Exceptions."
   [spec]
-  (r/rescue nil
-    (some-> (requiring-resolve
-             (symbol (:addon/init-ns spec) (:addon/init-fn spec)))
-            var-get)))
+  (let [sym (symbol (:addon/init-ns spec) (:addon/init-fn spec))]
+    (try
+      (if-let [resolved (requiring-resolve sym)]
+        (let [ctor (var-get resolved)]
+          (if (ifn? ctor)
+            {:constructor/status :resolved
+             :constructor/symbol (str sym)
+             :constructor ctor}
+            {:constructor/status :invalid
+             :constructor/symbol (str sym)
+             :constructor/error (str "constructor var is not callable: " sym)}))
+        {:constructor/status :absent
+         :constructor/symbol (str sym)
+         :constructor/error (str "constructor var is absent: " sym)})
+      (catch Exception error
+        (let [root (root-cause error)]
+          {:constructor/status :failed
+           :constructor/symbol (str sym)
+           :constructor/error (str "constructor namespace failed to load: " sym
+                                   " — " (or (ex-message error)
+                                             (.getName (class error))))
+           :constructor/exception (.getName (class error))
+           :constructor/cause (.getName (class root))
+           :constructor/cause-message (or (ex-message root)
+                                          (.getName (class root)))})))))
 
 (defn- dependency-ids
   "The ids `spec` depends on within `all-specs`: hard :addon/dependencies plus
@@ -150,11 +183,13 @@
     (assoc config :mount/dependencies deps)))
 
 (defn- mount-result
-  [id success? phase & {:keys [errors already-initialized? init-attempts]}]
+  [id success? phase & {:keys [errors already-initialized? init-attempts
+                               constructor-resolution]}]
   (cond-> {:addon/id id :success? success? :phase phase}
     (seq errors)                (assoc :errors (vec errors))
     (some? already-initialized?) (assoc :already-initialized? already-initialized?)
-    (some? init-attempts)        (assoc :init-attempts init-attempts)))
+    (some? init-attempts)        (assoc :init-attempts init-attempts)
+    (map? constructor-resolution) (merge (dissoc constructor-resolution :constructor))))
 
 (def default-init-retry
   "Default bounded initializer retry policy. :max-attempts counts the first call."
@@ -261,59 +296,120 @@
 ;; mount! — drive the plan through the host, graceful degrade
 ;; =============================================================================
 
+(defn- registration-took?
+  "Did `host` actually accept `instance` as the addon for `id`?
+
+   A host is free to REFUSE a duplicate registration — hive-mcp's addon registry
+   does exactly that, logging a warning and returning {:success? false} rather
+   than replacing. Through the IMountHost port that refusal is invisible:
+   register! returns the host either way. The mount then initializes whatever
+   object the registry still holds and reports success, so a REMOUNT silently
+   degrades into `shutdown! + initialize!` on the STALE instance — the precise
+   failure this pipeline exists to prevent, wearing a green result.
+
+   Returns true when the host holds this exact instance, or when it holds nothing
+   for the id (a minimal host may not track instances at all — nil is
+   indistinguishable from `not implemented`, so it is not treated as a refusal).
+   Only a DIFFERENT object counts as a refusal."
+  [host id instance]
+  (let [held (r/rescue nil (port/registered host id))]
+    (or (nil? held) (identical? held instance))))
+
 (defn- mount-one
   "Attempt to mount a single spec into host. Returns a MountResult. Never
-   throws — every failure is folded into the result (graceful degrade)."
-  [spec host all-specs resolve-config init-retry on-event sleep-fn]
-  (let [id   (:addon/id spec)
-        ctor (resolve-constructor spec)]
-    (if (nil? ctor)
-      (mount-result id false :resolved :errors ["constructor could not be resolved"])
-      (let [cfg (r/try-effect
-                 {:config (inject-dependencies (resolve-config spec) host spec all-specs)
-                  :retry-policy (retry-policy spec init-retry)})]
-        (if (r/err? cfg)
-          (mount-result id false :config :errors [(:message cfg)])
-          (let [{:keys [config retry-policy]} (:ok cfg)
-                instance (r/rescue nil (ctor config))]
-            (cond
-              (nil? instance)
-              (mount-result id false :failed :errors ["constructor returned nil or threw"])
+   throws — every failure is folded into the result (graceful degrade).
 
-              (not (proto/addon? instance))
-              (mount-result id false :failed :errors ["constructor did not return an IAddon"])
+   The licence gate runs FIRST: a refused spec never has its constructor
+   namespace loaded, so unlicensed code is not merely unused but unread."
+  [spec host all-specs resolve-config init-retry on-event sleep-fn gate]
+  (let [id (:addon/id spec)]
+    (if-let [reason (ent/permit gate spec)]
+      (do
+        (emit! on-event {:event :mount/entitlement-refused
+                         :level :warn
+                         :addon/id id
+                         :deny/reason reason})
+        (assoc (mount-result id false :entitlement
+                             :errors [(str "licence gate refused: " (symbol reason))])
+               :deny/reason reason))
+      (let [resolution (resolve-constructor spec)
+            ctor       (:constructor resolution)]
+        (if-not (= :resolved (:constructor/status resolution))
+          (mount-result id false :resolved
+                        :errors [(:constructor/error resolution)]
+                        :constructor-resolution resolution)
+          (let [cfg (r/try-effect
+                     {:config (inject-dependencies (resolve-config spec) host spec all-specs)
+                      :retry-policy (retry-policy spec init-retry)})]
+            (if (r/err? cfg)
+              (mount-result id false :config :errors [(:message cfg)])
+              (let [{:keys [config retry-policy]} (:ok cfg)
+                    instance (r/rescue nil (ctor config))]
+                (cond
+                  (nil? instance)
+                  (mount-result id false :failed :errors ["constructor returned nil or threw"])
 
-              :else
-              (let [reg (r/try-effect (port/register! host instance))]
-                (if (r/err? reg)
-                  (mount-result id false :registered :errors [(:message reg)])
-                  (let [ir (retry-init! host id config retry-policy on-event sleep-fn)]
-                    (mount-result id (boolean (:success? ir)) :initialized
-                                  :errors (:errors ir)
-                                  :already-initialized? (:already-initialized? ir)
-                                  :init-attempts (:init-attempts ir))))))))))))
+                  (not (proto/addon? instance))
+                  (mount-result id false :failed :errors ["constructor did not return an IAddon"])
+
+                  :else
+                  (let [reg (r/try-effect (port/register! host instance))]
+                    (cond
+                      (r/err? reg)
+                      (mount-result id false :registered :errors [(:message reg)])
+
+                      (not (registration-took? host id instance))
+                      (do
+                        (emit! on-event {:event :mount/registration-refused
+                                         :level :error
+                                         :addon/id id})
+                        (mount-result id false :registered
+                                      :errors [(str "host kept a different instance for " id
+                                                    " — register! did not replace. A host driving a "
+                                                    "remount must accept the new instance; otherwise "
+                                                    "the stale one stays live.")]))
+
+                      :else
+                      (let [ir (retry-init! host id config retry-policy on-event sleep-fn)]
+                        (mount-result id (boolean (:success? ir)) :initialized
+                                      :errors (:errors ir)
+                                      :already-initialized? (:already-initialized? ir)
+                                      :init-attempts (:init-attempts ir))))))))))))))
 
 (defn mount!
   "Mount every spec in (plan :ordered) into host, in order. Returns a MountReport.
-   For each spec: resolve ctor, build config via resolve-config then inject
-   already-mounted sibling instances under :mount/dependencies, construct, verify
-   IAddon, register!, init!. Any failure is recorded and the loop CONTINUES —
-   already-mounted addons are NEVER torn down (graceful degrade). :ok? is true
-   only when every attempted spec succeeded.
+   For each spec: check the licence gate, resolve ctor, build config via
+   resolve-config then inject already-mounted sibling instances under
+   :mount/dependencies, construct, verify IAddon, register!, init!. Any failure
+   is recorded and the loop CONTINUES — already-mounted addons are NEVER torn
+   down (graceful degrade). :ok? is true only when every attempted spec
+   succeeded.
 
    opts: {:resolve-config (fn [spec] -> config-map)  (default resolve-config-default)
           :init-retry    retry-policy override
+          :license-gate  ILicenseGate or (fn [spec] -> nil | reason)
+                         (default: the installed gate)
+          :peer-specs    the spec set used to resolve each spec's dependencies
+                         for sibling injection (default: the plan's own :ordered)
           :on-event      (fn [event-map])
-          :sleep-fn      (fn [milliseconds])}."
+          :sleep-fn      (fn [milliseconds])}.
+
+   :peer-specs exists for mounting a SLICE of a larger system — a hot-reload
+   remounts only the affected addons, but their capability-providing siblings
+   live outside that slice. Resolving dependencies against :ordered alone would
+   silently drop those siblings from :mount/dependencies, handing the remounted
+   addon a thinner config than its original mount got."
   ([plan host] (mount! plan host {}))
-  ([plan host {:keys [resolve-config init-retry on-event sleep-fn]
+  ([plan host {:keys [resolve-config init-retry on-event sleep-fn license-gate peer-specs]
                :or {resolve-config port/resolve-config-default
                     init-retry {}
                     on-event (constantly nil)
                     sleep-fn (fn [ms] (Thread/sleep (long ms)))}}]
-   (let [ordered (:ordered plan)
-         results (mapv #(mount-one % host ordered resolve-config
-                                   init-retry on-event sleep-fn)
+   (let [gate    (or license-gate (ent/installed-gate))
+         ordered (:ordered plan)
+         peers   (or (seq peer-specs) ordered)
+         results (mapv #(mount-one % host peers resolve-config
+                                   init-retry on-event sleep-fn gate)
                        ordered)]
      {:mounted results
       :order   (mapv :addon/id ordered)
@@ -326,19 +422,27 @@
 
 (defn dry-run
   "Compute the MountReport that mounting would produce WITHOUT any effects:
-   no construction, registration, or initialization. Resolves each ctor
-   read-only and marks it :phase :skipped :success? true when resolvable, else
+   no construction, registration, or initialization. Applies the licence gate
+   and resolves each ctor read-only, marking a spec :phase :skipped :success?
+   true when it would mount, :phase :entitlement when the gate refuses, else
    :phase :resolved :success? false. Golden-replay parity: for an all-success
    plan, dry-run :order and :mounted ids equal mount! :order and :mounted ids."
   ([plan host] (dry-run plan host {}))
-  ([plan _host _opts]
-   (let [ordered (:ordered plan)
+  ([plan _host {:keys [license-gate]}]
+   (let [gate    (or license-gate (ent/installed-gate))
+         ordered (:ordered plan)
          results (mapv (fn [spec]
                          (let [id (:addon/id spec)]
-                           (if (resolve-constructor spec)
-                             (mount-result id true :skipped)
-                             (mount-result id false :resolved
-                                           :errors ["constructor could not be resolved"]))))
+                           (if-let [reason (ent/permit gate spec)]
+                             (assoc (mount-result id false :entitlement
+                                                  :errors [(str "licence gate refused: " (symbol reason))])
+                                    :deny/reason reason)
+                             (let [resolution (resolve-constructor spec)]
+                               (if (= :resolved (:constructor/status resolution))
+                                 (mount-result id true :skipped)
+                                 (mount-result id false :resolved
+                                               :errors [(:constructor/error resolution)]
+                                               :constructor-resolution resolution))))))
                        ordered)]
      {:mounted results
       :order   (mapv :addon/id ordered)
