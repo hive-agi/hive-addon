@@ -117,18 +117,55 @@
    [:errors {:optional true} [:sequential :string]]])
 
 ;; =============================================================================
+;; Port-layer and pure-stratum shapes
+;; =============================================================================
+
+(def AddonIdSet
+  "A set of addon ids — a reload's seed set, and the closure it produces."
+  [:set s/AddonId])
+
+(def MountSpecs
+  "The mounted manifest slice a reload reasons over."
+  [:sequential ms/MountSpec])
+
+(def DependentsArgs
+  "Arglist of hive-addon.hot.cascade/dependents: the specs, then the seed ids.
+   A :cat schema, so a schema-driven test applies the subject rather than
+   passing the pair as one argument."
+  [:cat MountSpecs AddonIdSet])
+
+(def TeardownOutcome
+  "What hive-addon.hot.port/IMountDriver's -teardown! reports."
+  [:map {:closed false}
+   [:torn-down [:sequential s/AddonId]]
+   [:errors {:optional true} [:sequential :string]]])
+
+(def NsReloadOutcome
+  "What hive-addon.hot.port/INsReloader's -reload-nss! reports. :failed names the
+   namespace a reload stopped at; its absence means every namespace loaded."
+  [:map {:closed false}
+   [:loaded [:sequential :any]]
+   [:failed {:optional true} [:maybe :any]]
+   [:error {:optional true} [:maybe :string]]])
+
+;; =============================================================================
 ;; Local composite registry — mount.schema registry + :hot/* schemas
 ;; =============================================================================
 
 (def ^:private hot-schemas
   "Static :hot/* -> schema map seeded into the local registry."
-  {:hot/trigger        HotTrigger
-   :hot/strategy-id    StrategyId
-   :hot/source-kind    SourceKind
-   :hot/source         AddonSource
-   :hot/registration   HotRegistration
-   :hot/report         HotReport
-   :hot/remount-report RemountReport})
+  {:hot/trigger            HotTrigger
+   :hot/strategy-id        StrategyId
+   :hot/source-kind        SourceKind
+   :hot/source             AddonSource
+   :hot/registration       HotRegistration
+   :hot/report             HotReport
+   :hot/remount-report     RemountReport
+   :hot/addon-id-set       AddonIdSet
+   :hot/specs              MountSpecs
+   :hot/dependents-args    DependentsArgs
+   :hot/teardown-outcome   TeardownOutcome
+   :hot/ns-reload-outcome  NsReloadOutcome})
 
 (def registry
   "Composite malli registry: hive-addon.mount.schema's registry (malli defaults +

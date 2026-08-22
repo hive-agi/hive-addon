@@ -30,9 +30,9 @@
    implemented. `no-reload` is that rule as data; feed it to hive-hot's
    :no-reload and the hazard cannot be tripped."
   (:require [hive-addon.hot.cascade :as cascade]
+            [hive-addon.hot.mount-driver :as driver]
             [hive-addon.hot.source :as source]
             [hive-addon.hot.strategy :as strategy]
-            [hive-addon.mount.port :as port]
             [hive-dsl.result :as r]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
@@ -56,6 +56,7 @@
   '#{hive-addon.protocol
      hive-addon.mount.port
      hive-addon.hot
+     hive-addon.hot.port
      hive-addon.hot.strategy})
 
 ;; =============================================================================
@@ -117,13 +118,14 @@
 
 (defn- reload-ctx
   [host specs spec seeds {:keys [trigger changed-ns ns-reloaded? mount-opts
-                                 solve-opts strategies reload-ns!]
+                                 solve-opts strategies reload-ns! mount-driver]
                           :as opts}]
   (let [stray (select-keys opts mount-opt-keys)]
     {:hot/host host
      :hot/specs specs
      :hot/seeds seeds
      :hot/source (source/spec-source spec)
+     :hot/mount-driver (or mount-driver (driver/mount-driver))
      :hot/trigger (or trigger :manual)
      :hot/changed-ns changed-ns
      :hot/ns-reloaded? (boolean ns-reloaded?)
