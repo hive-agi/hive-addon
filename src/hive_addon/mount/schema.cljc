@@ -47,6 +47,11 @@
    :addon/trust-class defaults to :foss when absent; :proprietary makes the
    spec gated, and a gated spec mounts only through a licence gate.
    :addon/entitlement names the unit a gate checks the licence against.
+
+   :addon/reload-strategy names the hot-reload strategy this addon requires
+   (hive-addon.hot.strategy). Absent means the default chain selects one. It is
+   an open :keyword, never an enum — the strategy set is extensible by any
+   module, and closing it here would be the defect.
    Open."
   [:map {:closed false}
    [:addon/id s/AddonId]
@@ -60,6 +65,7 @@
    [:addon/dependencies {:optional true :default #{}} [:set s/AddonId]]
    [:addon/requires-capabilities {:optional true :default #{}} [:set :keyword]]
    [:addon/init-retry {:optional true} InitRetryPolicy]
+   [:addon/reload-strategy {:optional true} :keyword]
    [:addon/description {:optional true} [:maybe :string]]
    [:addon/author {:optional true} [:maybe :string]]
    [:addon/license {:optional true} [:maybe :string]]

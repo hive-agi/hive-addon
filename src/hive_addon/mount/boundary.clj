@@ -296,6 +296,25 @@
 ;; mount! — drive the plan through the host, graceful degrade
 ;; =============================================================================
 
+(defn- registration-took?
+  "Did `host` actually accept `instance` as the addon for `id`?
+
+   A host is free to REFUSE a duplicate registration — hive-mcp's addon registry
+   does exactly that, logging a warning and returning {:success? false} rather
+   than replacing. Through the IMountHost port that refusal is invisible:
+   register! returns the host either way. The mount then initializes whatever
+   object the registry still holds and reports success, so a REMOUNT silently
+   degrades into `shutdown! + initialize!` on the STALE instance — the precise
+   failure this pipeline exists to prevent, wearing a green result.
+
+   Returns true when the host holds this exact instance, or when it holds nothing
+   for the id (a minimal host may not track instances at all — nil is
+   indistinguishable from `not implemented`, so it is not treated as a refusal).
+   Only a DIFFERENT object counts as a refusal."
+  [host id instance]
+  (let [held (r/rescue nil (port/registered host id))]
+    (or (nil? held) (identical? held instance))))
+
 (defn- mount-one
   "Attempt to mount a single spec into host. Returns a MountResult. Never
    throws — every failure is folded into the result (graceful degrade).
@@ -335,8 +354,22 @@
 
                   :else
                   (let [reg (r/try-effect (port/register! host instance))]
-                    (if (r/err? reg)
+                    (cond
+                      (r/err? reg)
                       (mount-result id false :registered :errors [(:message reg)])
+
+                      (not (registration-took? host id instance))
+                      (do
+                        (emit! on-event {:event :mount/registration-refused
+                                         :level :error
+                                         :addon/id id})
+                        (mount-result id false :registered
+                                      :errors [(str "host kept a different instance for " id
+                                                    " — register! did not replace. A host driving a "
+                                                    "remount must accept the new instance; otherwise "
+                                                    "the stale one stays live.")]))
+
+                      :else
                       (let [ir (retry-init! host id config retry-policy on-event sleep-fn)]
                         (mount-result id (boolean (:success? ir)) :initialized
                                       :errors (:errors ir)
@@ -356,17 +389,26 @@
           :init-retry    retry-policy override
           :license-gate  ILicenseGate or (fn [spec] -> nil | reason)
                          (default: the installed gate)
+          :peer-specs    the spec set used to resolve each spec's dependencies
+                         for sibling injection (default: the plan's own :ordered)
           :on-event      (fn [event-map])
-          :sleep-fn      (fn [milliseconds])}."
+          :sleep-fn      (fn [milliseconds])}.
+
+   :peer-specs exists for mounting a SLICE of a larger system — a hot-reload
+   remounts only the affected addons, but their capability-providing siblings
+   live outside that slice. Resolving dependencies against :ordered alone would
+   silently drop those siblings from :mount/dependencies, handing the remounted
+   addon a thinner config than its original mount got."
   ([plan host] (mount! plan host {}))
-  ([plan host {:keys [resolve-config init-retry on-event sleep-fn license-gate]
+  ([plan host {:keys [resolve-config init-retry on-event sleep-fn license-gate peer-specs]
                :or {resolve-config port/resolve-config-default
                     init-retry {}
                     on-event (constantly nil)
                     sleep-fn (fn [ms] (Thread/sleep (long ms)))}}]
    (let [gate    (or license-gate (ent/installed-gate))
          ordered (:ordered plan)
-         results (mapv #(mount-one % host ordered resolve-config
+         peers   (or (seq peer-specs) ordered)
+         results (mapv #(mount-one % host peers resolve-config
                                    init-retry on-event sleep-fn gate)
                        ordered)]
      {:mounted results
