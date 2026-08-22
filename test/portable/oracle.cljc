@@ -21,7 +21,8 @@
 
    The IMountDriver leg lives in oracle_driver.cljc because cljrs cannot yet
    implement a protocol from another namespace; see that file."
-  (:require [hive-addon.cli.response :as resp]
+  (:require [hive-addon.cli :as cli]
+            [hive-addon.cli.response :as resp]
             [hive-addon.cli.tree :as tree]
             [hive-addon.hot.cascade :as cascade]
             [hive-addon.hot.strategy :as strat]
@@ -149,5 +150,44 @@
 (emit "resp/text"          (resp/text "hi"))
 (emit "resp/error"         (resp/error "bad"))
 (emit "resp/error?"        [(resp/error? (resp/error "bad")) (resp/error? (resp/text "hi"))])
+
+
+;; =============================================================================
+;; cli dispatch
+;; =============================================================================
+;; The catch below is a TOTAL reader conditional (:clj plus :default), which is
+;; the one shape that is safe across these hosts: cljw matches :clj and has
+;; Throwable, cljrs falls through to :default. A non-total #? would vanish on
+;; cljrs and silently stop catching.
+
+(def handlers
+  {:greet (fn [params] (resp/text (str "hi " (:who params))))
+   :nested {:deep (fn [_] (resp/text "deep"))
+            :_handler (fn [_] (resp/text "tree-default"))}})
+
+(def handler (cli/make-handler handlers))
+
+(emit "cli/dispatch"        (handler {:command "greet" :who "pedro"}))
+(emit "cli/keyword-command" (handler {:command :greet :who "x"}))
+(emit "cli/nested"          (handler {:command "nested deep"}))
+(emit "cli/tree-default"    (handler {:command "nested"}))
+(emit "cli/unknown"         (:isError (handler {:command "nope"})))
+(emit "cli/missing-command" (:isError (handler {})))
+(emit "cli/help-is-text"    (= "text" (:type (handler {:command "help"}))))
+
+;; an injected coercion fn is applied before the handler sees the params
+(def coercing
+  (cli/make-handler {:n (fn [params] (resp/text (pr-str (:n params))))}
+                    {:coerce-schema {:n [:int]}
+                     :coerce-fn (fn [_schema params]
+                                  {:ok (update params :n (fn [v] (if (string? v) (parse-long v) v)))})}))
+(emit "cli/coerced"  (coercing {:command "n" :n "42"}))
+
+;; and declaring a schema with no coercion fn REFUSES at wiring time rather than
+;; handing the handler the raw strings it asked to have coerced
+(emit "cli/refuses-schema-without-fn"
+      (try (do (cli/make-handler handlers {:coerce-schema {:n [:int]}}) :no-refusal)
+           (catch #?(:clj Throwable :default :default) t
+             (:cli/error (ex-data t)))))
 
 (println "ORACLE-END")
