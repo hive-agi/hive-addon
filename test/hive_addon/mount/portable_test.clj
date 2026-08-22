@@ -29,33 +29,37 @@
 
    This list is exactly the set of namespaces test/portable/oracle.cljc
    exercises, and that correspondence is the whole discipline: a namespace is
-   admitted here only once its BEHAVIOUR has been shown identical on the JVM,
-   cljw and cljrs. Merely loading on all three is a strictly weaker fact —
-   hive-addon.mount.solve loaded and ran on cljrs while returning a wrong mount
-   order, and hive-addon.plug.merge loaded on cljrs and threw on first call. So
-   do not add a root here to express an intention; add it when the oracle covers
-   it.
+   admitted when its BEHAVIOUR has been shown identical on the JVM, cljw and
+   cljrs, never when it merely loads. hive-addon.mount.solve loaded and ran on
+   cljrs while returning a wrong mount order; hive-addon.plug.merge loaded on
+   cljrs and threw on first call. So do not add a root here to express an
+   intention — add it when the oracle covers it.
 
-   Absent, with the reason MEASURED rather than assumed (2026-08-22): everything
-   whose closure reaches malli — hive-addon.schema, mount.schema, plug.schema,
-   capability, plug, mount.entitlement. The obstacle is NOT the Maven
-   coordinate (cljw resolving only :git/url and :local/root is real, but laying
-   malli's source on the classpath directly does not fix it). malli itself does
-   not load on either host:
+   Absent, each for a MEASURED reason (2026-08-22):
 
-     cljw  — malli.core, malli.registry and malli.impl.regex all load;
-             malli.util fails to resolve `get`, which its ns form excludes from
-             clojure.core and defines itself. malli.error requires malli.util,
-             so the schema namespaces here fail through it.
-     cljrs — malli.impl.regex fails at `(defprotocol ^:private Driver ...)`:
-             cljrs rejects METADATA on a protocol name with \"defprotocol
-             requires a symbol at position 0\". That blocks malli.core and
-             therefore all of malli.
+   - hive-addon.protocol and hive-addon.mount.port. Both are malli-free and load
+     on all three hosts, but neither can be EXERCISED on cljrs: their whole job
+     is hosting IAddon implementations, and cljrs cannot implement a protocol
+     from another namespace ([CLJRS-PROTOCOL-XNS]) — the same limitation that
+     puts the IMountDriver leg in oracle_driver.cljc. mount.port's records were
+     nonetheless fixed to read fields through `this`, so they are ready the day
+     that lands.
 
-   So that tier moves when those two upstream defects move, not when this repo's
-   deps.edn changes. Note this bounds the RUNTIME closure only — schemas remain
-   a JVM-side boundary layer and hive-schemas coverage of these subjects is
-   unaffected (see hive-addon.plug.portable-trifecta-test)."
+   - Everything whose closure reaches malli: hive-addon.schema, mount.schema,
+     plug.schema, capability, plug, mount.entitlement. The obstacle is NOT the
+     Maven coordinate — laying malli's own source on the classpath does not
+     help, because malli does not load on either host:
+       cljw  — malli.core, malli.registry and malli.impl.regex all load;
+               malli.util fails to resolve `get`, which its ns form excludes
+               from clojure.core and defines itself, and malli.error requires
+               malli.util.
+       cljrs — malli.impl.regex fails at `(defprotocol ^:private Driver ...)`;
+               cljrs rejects metadata on a protocol name, which takes malli.core
+               with it.
+     That bounds the RUNTIME closure only. Schemas remain a JVM-side boundary
+     layer, so hive-schemas coverage of these subjects is unaffected — see
+     hive-addon.plug.portable-trifecta-test and
+     hive-addon.mount.solve-trifecta-test."
   '#{hive-addon.hot.strategy
      hive-addon.hot.port
      hive-addon.hot.cascade
@@ -64,7 +68,11 @@
      hive-addon.plug.source
      hive-addon.cli
      hive-addon.cli.tree
-     hive-addon.cli.response})
+     hive-addon.cli.response
+     hive-addon.registry.tools
+     hive-addon.registry.extension
+     hive-addon.registry.commands
+     hive-addon.registry.schema})
 
 ;; =============================================================================
 ;; Reading the stratum off disk
@@ -283,14 +291,15 @@
         (is (seq (for-bindings (forms-of 'hive-addon.plug)))
             "hive-addon.plug uses `for`")
         (is (seq (unevaluated-or-defaults (forms-of 'hive-addon.mount.boundary)))
-            "hive-addon.mount.boundary has symbol/fn :or defaults")
-        (is (seq (bare-record-fields (forms-of 'hive-addon.mount.port)))
-            "hive-addon.mount.port/AtomMountHost reads its `reg` field bare"))
+            "hive-addon.mount.boundary has symbol/fn :or defaults"))
 
-      ;; The last two rules are also checked against LITERAL forms. A file-based
-      ;; discrimination check quietly stops discriminating the day someone fixes
-      ;; the namespace it points at, and self-shadowing has no violator left in
-      ;; this repo at all — hive-addon.cli.response/text was the only one.
+      ;; bare-record-fields and self-shadowing-params are checked against LITERAL
+      ;; forms only, and that is deliberate. A file-based discrimination check
+      ;; stops discriminating the moment someone fixes the namespace it points
+      ;; at — which happened here within the hour: this test named
+      ;; hive-addon.mount.port/AtomMountHost as the bare-field witness, and then
+      ;; AtomMountHost was fixed to read through `this`. Literal forms cannot be
+      ;; fixed out from under the check.
       (testing "against literal forms, which no future cleanup can erase"
         (is (= '([R x])
                (bare-record-fields '[(defrecord R [x] IP (m [_] x))])))
@@ -301,9 +310,17 @@
              (bare-record-fields '[(defrecord R [x] IP (m [x] x))]))
             "a method PARAMETER may share a field name; it shadows correctly")
         (is (= '(text) (self-shadowing-params '[(defn text [text] text)])))
-        (is (empty? (self-shadowing-params '[(defn text [content] content)]))))
+        (is (empty? (self-shadowing-params '[(defn text [content] content)])))
+        ;; and the other three, so every rule has a witness nothing can erase
+        (is (pos? (reader-conditional-count
+                   (read-string {:read-cond :preserve} "(defn f [] #?(:clj 1 :cljs 2))"))))
+        (is (seq (for-bindings '[(defn f [xs] (for [x xs :when (odd? x)] x))])))
+        (is (seq (unevaluated-or-defaults '[(defn f [{:keys [k] :or {k SOME-VAR}}] k)])))
+        (is (empty? (unevaluated-or-defaults '[(defn f [{:keys [k] :or {k false}}] k)]))
+            "a self-evaluating default is fine and must not be flagged"))
 
       (testing "and no violating namespace is in the portable stratum"
         (let [nses (portable-nses)]
           (is (not-any? nses '[hive-addon.schema hive-addon.plug
-                               hive-addon.mount.boundary hive-addon.mount.port])))))))
+                               hive-addon.mount.boundary hive-addon.mount.port
+                               hive-addon.protocol])))))))

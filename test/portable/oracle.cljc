@@ -22,6 +22,10 @@
    The IMountDriver leg lives in oracle_driver.cljc because cljrs cannot yet
    implement a protocol from another namespace; see that file."
   (:require [hive-addon.cli :as cli]
+            [hive-addon.registry.commands :as rcmd]
+            [hive-addon.registry.extension :as rext]
+            [hive-addon.registry.schema :as rsch]
+            [hive-addon.registry.tools :as rtool]
             [hive-addon.cli.response :as resp]
             [hive-addon.cli.tree :as tree]
             [hive-addon.hot.cascade :as cascade]
@@ -189,5 +193,55 @@
       (try (do (cli/make-handler handlers {:coerce-schema {:n [:int]}}) :no-refusal)
            (catch #?(:clj Throwable :default :default) t
              (:cli/error (ex-data t)))))
+
+
+;; =============================================================================
+;; host-surface registries
+;; =============================================================================
+;; Stateful (atom-backed) and process-global, so every observation clears first
+;; and reads back a value it just wrote. Order within this section is
+;; significant; that is the point of clearing.
+
+(rtool/clear!)
+(rtool/register! {:name "t1" :handler (fn [_] :one)})
+(rtool/register! {:name "t2" :handler (fn [_] :two)})
+(emit "reg.tools/names"      (vec (sort (rtool/registered-names))))
+(emit "reg.tools/get"        (some? (rtool/get-tool "t1")))
+(emit "reg.tools/handler"    ((:handler (rtool/get-tool "t2")) {}))
+(rtool/deregister! "t1")
+(emit "reg.tools/after-drop" (vec (sort (rtool/registered-names))))
+(rtool/clear!)
+(emit "reg.tools/cleared"    (vec (rtool/registered-names)))
+
+(rext/clear!)
+(rext/register! :ext/a :value-a)
+(rext/register-many! {:ext/b :value-b :ext/c :value-c})
+(emit "reg.ext/keys"       (vec (sort (rext/registered-keys))))
+(emit "reg.ext/get"        (rext/get-extension :ext/b))
+(emit "reg.ext/available"  [(rext/extension-available? :ext/a) (rext/extension-available? :ext/zz)])
+(rext/deregister! :ext/a)
+(emit "reg.ext/after-drop" (vec (sort (rext/registered-keys))))
+(rext/clear!)
+
+(rcmd/clear!)
+;; two addons contribute to the SAME tool, so retract! must remove one addon's
+;; commands and leave the other's — a retraction keyed by tool alone would pass
+;; a single-contributor fixture
+(emit "reg.cmd/contributed-a" (vec (sort (map str (rcmd/contribute! "code" "addon.a" {:cider {:handler (fn [_] :cider) :description "cider"}})))))
+(emit "reg.cmd/contributed-b" (vec (sort (map str (rcmd/contribute! "code" "addon.b" {:carto {:handler (fn [_] :carto) :description "carto"}})))))
+(emit "reg.cmd/tool-names" (vec (sort (rcmd/contributed-tool-names))))
+(emit "reg.cmd/commands"   (vec (sort (map str (keys (rcmd/get-commands "code"))))))
+(rcmd/retract! "code" "addon.a")
+(emit "reg.cmd/after-drop" (vec (sort (map str (keys (rcmd/get-commands "code"))))))
+(emit "reg.cmd/survivor-addon" (:addon (get (rcmd/get-commands "code") "carto")))
+(rcmd/clear!)
+(emit "reg.cmd/cleared"    (vec (rcmd/contributed-tool-names)))
+
+(rsch/clear!)
+(rsch/register! "code" {"extra-param" {:type "string"}})
+(emit "reg.schema/tool-names" (vec (sort (rsch/extended-tool-names))))
+(emit "reg.schema/extensions" (rsch/get-extensions "code"))
+(rsch/clear!)
+(emit "reg.schema/cleared"    (vec (rsch/extended-tool-names)))
 
 (println "ORACLE-END")
