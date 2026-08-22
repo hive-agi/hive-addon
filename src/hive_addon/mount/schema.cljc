@@ -85,6 +85,17 @@
    [:unmet-capabilities [:map-of s/AddonId [:set :keyword]]]
    [:duplicates [:map-of s/AddonId :int]]])
 
+(def SolveArgs
+  "Arglist of hive-addon.mount.solve/solve in its single-arity form: just the
+   spec set. A :cat schema, so a schema-driven test APPLIES the subject rather
+   than handing it the vector as one argument.
+
+   The options map is deliberately not modelled here. Its two keys select
+   behaviour (a custom rule chain, fail-closed cycles) rather than describe a
+   value, and a generated `:rules` would be a generated rule chain — which is a
+   different subject under test, not a wider sample of this one."
+  [:cat [:sequential MountSpec]])
+
 (def MountResult
   "Per-addon mount outcome. :phase records how far the addon got; :success?
    whether that addon mounted; :errors the accumulated failure strings.
@@ -133,6 +144,7 @@
   {:mount/init-retry-policy InitRetryPolicy
    :mount/spec            MountSpec
    :mount/plan            MountPlan
+   :mount/solve-args      SolveArgs
    :mount/result          MountResult
    :mount/report          MountReport
    :mount/teardown-report TeardownReport})
