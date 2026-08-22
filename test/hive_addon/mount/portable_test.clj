@@ -36,12 +36,27 @@
    do not add a root here to express an intention; add it when the oracle covers
    it.
 
-   Deliberately absent, for reasons that are not fixable by editing this vector:
-   anything whose closure reaches malli (hive-addon.schema, mount.schema,
-   plug.schema, capability, plug, mount.entitlement) — cljw resolves only
-   :git/url and :local/root coords, so a Maven-only dep is simply not there —
-   and hive-addon.cli, whose coercion hook is a host lookup that wants to become
-   an injected port before it can be portable."
+   Absent, with the reason MEASURED rather than assumed (2026-08-22):
+
+   - Everything whose closure reaches malli — hive-addon.schema, mount.schema,
+     plug.schema, capability, plug, mount.entitlement. The obstacle is NOT the
+     Maven coordinate (cljw resolving only :git/url and :local/root is real, but
+     laying malli's source on the classpath directly does not fix it). malli
+     itself does not load on either host:
+       cljw  — malli.core, malli.registry and malli.impl.regex all load;
+               malli.util fails to resolve `get`, which its ns form excludes
+               from clojure.core and defines itself. malli.error requires
+               malli.util, so the schema namespaces here fail through it.
+       cljrs — malli.impl.regex fails at `(defprotocol ^:private Driver ...)`:
+               cljrs rejects METADATA on a protocol name with \"defprotocol
+               requires a symbol at position 0\". That blocks malli.core and
+               therefore all of malli.
+     So this tier moves when those two upstream defects move, not when this
+     repo's deps.edn changes.
+
+   - hive-addon.cli, whose coercion hook is a host lookup (`requiring-resolve`
+     behind a reader conditional) that wants to become an injected port first —
+     that one IS ours to fix."
   '#{hive-addon.hot.strategy
      hive-addon.hot.port
      hive-addon.hot.cascade
