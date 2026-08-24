@@ -100,6 +100,12 @@
    first. :mounted carries the per-addon MountResult from the ORDINARY mount
    pipeline — hot-reload is a projection of mount!, not a second registry.
 
+   :hot/ns-reloaded names every namespace the reloader loaded, which is not
+   bounded by the seeds: an image-wide reloader loads whatever changed on disk.
+   :hot/widened is the addon ids that joined :hot/affected for that reason —
+   absent when the reload stayed inside the requested slice, so \"nothing else
+   changed\" and \"other addons were dragged in\" are distinguishable.
+
    :hot/strategy names the strategy that ran. :teardown/data-preserved? inherits
    the no-nuke invariant: [:= true]. Open."
   [:map {:closed false}
@@ -111,6 +117,7 @@
    [:hot/torn-down [:sequential s/AddonId]]
    [:hot/cycles {:optional true} [:set s/AddonId]]
    [:hot/ns-reloaded {:optional true} [:sequential :string]]
+   [:hot/widened {:optional true} [:set s/AddonId]]
    [:teardown/data-preserved? [:= true]]
    [:mounted [:sequential ms/MountResult]]
    [:ok? :boolean]
