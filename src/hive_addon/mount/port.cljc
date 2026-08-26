@@ -50,18 +50,21 @@
 
 (defrecord AtomMountHost [reg]
   IMountHost
+  ;; `(:reg this)` throughout rather than the bare field symbol `reg`: cljrs
+  ;; does not bind a defrecord's fields inside its method bodies (it answers
+  ;; `unbound symbol: reg`), while keyword access on `this` works on every host.
   (register! [this addon]
-    (swap! reg assoc (proto/addon-id addon) addon)
+    (swap! (:reg this) assoc (proto/addon-id addon) addon)
     this)
-  (init! [_ addon-id config]
-    (when-let [addon (get @reg addon-id)]
+  (init! [this addon-id config]
+    (when-let [addon (get @(:reg this) addon-id)]
       (proto/initialize! addon config)))
-  (shutdown! [_ addon-id]
-    (when-let [addon (get @reg addon-id)]
+  (shutdown! [this addon-id]
+    (when-let [addon (get @(:reg this) addon-id)]
       (proto/shutdown! addon))
     nil)
-  (registered [_ addon-id]
-    (get @reg addon-id)))
+  (registered [this addon-id]
+    (get @(:reg this) addon-id)))
 
 (defn atom-mount-host
   "Construct an in-memory IMountHost backed by an atom map id->addon.

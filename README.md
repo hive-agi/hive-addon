@@ -1,5 +1,14 @@
 # hive-addon
 
+<!-- hive-badges -->
+
+[![Clojars Project](https://img.shields.io/clojars/v/io.github.hive-agi/hive-addon.svg)](https://clojars.org/io.github.hive-agi/hive-addon)
+[![cljdoc](https://cljdoc.org/badge/io.github.hive-agi/hive-addon)](https://cljdoc.org/d/io.github.hive-agi/hive-addon/CURRENT)
+[![release](https://github.com/hive-agi/hive-addon/actions/workflows/release.yml/badge.svg)](https://github.com/hive-agi/hive-addon/actions/workflows/release.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+
+<!-- /hive-badges -->
+
 Standalone `IAddon` contract — the addon/plugin abstraction as a leaf library.
 
 A host loads addons that implement `IAddon` to gain capabilities (Dependency

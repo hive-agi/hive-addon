@@ -342,6 +342,70 @@
       (testing "the old instances are untouched"
         (is (= [1 1 1] (mapv #(generation-of host %) ["probe.a" "probe.b" "probe.c"])))))))
 
+(defn- mount-with-outsider!
+  "Mount the A->B->C chain plus one addon whose constructor lives in a DIFFERENT
+   namespace. Returns [host specs outsider-ns].
+
+   Every other probe in this suite is built from hive-addon.hot-fixture, so
+   without a second namespace no test can tell an addon inside the reloaded
+   slice from one outside it."
+  []
+  (let [outsider-ns "hive-addon.hot-fixture-other"
+        outsider    (spec "probe.out" "make-other"
+                          :addon/init-ns outsider-ns
+                          :addon/config {:probe/id "probe.out"})
+        specs       (conj chain-specs outsider)
+        host        (mount/atom-mount-host)]
+    (mount/mount! (mount/solve specs) host)
+    [host specs outsider-ns]))
+
+(deftest a-reload-that-loads-another-addons-ns-remounts-that-addon-too
+  (testing "the injected reloader reloads the IMAGE, not the requested slice, so
+            an addon outside the slice can have its constructor namespace
+            reloaded — and remounting only the seed would leave it holding an
+            instance built from the superseded code"
+    (let [[host specs other-ns] (mount-with-outsider!)]
+      (is (= [1 1] (mapv #(generation-of host %) ["probe.a" "probe.out"])))
+      (let [report (hot/reload-addon! host specs "probe.a"
+                                      {:reload-ns! (fn [_] {:loaded [fixture-ns other-ns]})})]
+        (is (:ok? report) (pr-str (:errors report)))
+        (testing "the addon the reload dragged in is NAMED, not silently included"
+          (is (= #{"probe.out"} (:hot/widened report))))
+        (testing "and it is actually rebuilt, not left stale"
+          (is (contains? (set (:hot/affected report)) "probe.out"))
+          (is (= 2 (generation-of host "probe.out"))))
+        (testing ":hot/seeds still reports what was ASKED for"
+          (is (= #{"probe.a"} (:hot/seeds report))))
+        (is (nil? (hs/humanize-errors hs/RemountReport report))
+            (pr-str (hs/humanize-errors hs/RemountReport report)))))))
+
+(deftest a-reload-that-stays-inside-the-slice-does-not-widen
+  (testing "the control: :hot/widened is ABSENT, so \"nothing else changed\" is
+            distinguishable from \"other addons were dragged in\""
+    (let [[host specs _] (mount-with-outsider!)
+          report (hot/reload-addon! host specs "probe.a"
+                                    {:reload-ns! (fn [_] {:loaded [fixture-ns]})})]
+      (is (:ok? report) (pr-str (:errors report)))
+      (is (nil? (:hot/widened report)))
+      (is (not (contains? (set (:hot/affected report)) "probe.out")))
+      (testing "an addon nothing reloaded keeps the instance it had"
+        (is (= 1 (generation-of host "probe.out")))))))
+
+(deftest reloaded-namespaces-are-reported-as-strings-whatever-the-reloader-answers
+  (testing "clj-reload answers with SYMBOLS while :addon/init-ns and the report
+            schema are both STRINGS — an unconverted symbol matches no addon and
+            widening silently finds nothing"
+    (let [[host specs other-ns] (mount-with-outsider!)
+          report (hot/reload-addon!
+                  host specs "probe.a"
+                  {:reload-ns! (fn [_] {:loaded [(symbol fixture-ns) (symbol other-ns)]})})]
+      (is (:ok? report) (pr-str (:errors report)))
+      (is (= [fixture-ns other-ns] (:hot/ns-reloaded report)))
+      (is (every? string? (:hot/ns-reloaded report)))
+      (is (= #{"probe.out"} (:hot/widened report)))
+      (is (nil? (hs/humanize-errors hs/RemountReport report))
+          (pr-str (hs/humanize-errors hs/RemountReport report))))))
+
 ;; =============================================================================
 ;; Wiring, degradation, and the protocol interlock
 ;; =============================================================================

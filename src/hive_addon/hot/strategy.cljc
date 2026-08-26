@@ -22,12 +22,13 @@
    gate in hive-addon.mount.entitlement. Strategies are resolved from the var at
    CALL time, never captured at wiring time.
 
-   Effectful: this is the stratum that shuts addons down and mounts them again.
-   The namespace-level reloader is INJECTED (`:hot/reload-ns!`) rather than
-   required, so hive-hot stays a soft dependency."
+   Portable: this namespace names no host API. The two effectful collaborators —
+   the namespace reloader and the mount driver — arrive through the reload
+   context (`:hot/reload-ns!`, `:hot/mount-driver`), so hive-hot stays a soft
+   dependency and the classpath-bound mount boundary stays behind
+   hive-addon.hot.port/IMountDriver."
   (:require [hive-addon.hot.cascade :as cascade]
-            [hive-addon.mount.boundary :as boundary]
-            [hive-addon.mount.port :as port]
+            [hive-addon.hot.port :as hport]
             [hive-dsl.result :as r]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
@@ -125,6 +126,35 @@
                           [(str id ": failed at phase " phase)]))))
         (:mounted report)))
 
+(defn- widen-seeds
+  "Seed set to remount, given the ids the plan ALREADY covers and the namespaces
+   the reload actually loaded.
+
+   Returns [seeds' widened]: `widened` is the ids admitted beyond `affected`,
+   empty when the reload stayed inside the slice the caller asked for.
+
+   Two bounds. An addon joins only when its own :addon/init-ns was reloaded —
+   the namespace its instance is constructed from; a reloaded namespace the
+   constructor does not reach cannot change what a remount would build. And an
+   addon that NAMES a different :addon/reload-strategy is left alone: widening
+   extends a reload's reach, it does not overrule a declared policy."
+  [specs seeds affected loaded sid]
+  (let [index    (cascade/ns->addon-ids specs)
+        remount? (into {}
+                       (map (juxt :addon/id
+                                  (fn [s]
+                                    (let [declared (:addon/reload-strategy s)]
+                                      (or (nil? declared) (= sid declared))))))
+                       specs)
+        extra    (into #{}
+                       (comp (map str)
+                             (keep index)
+                             cat
+                             (remove affected)
+                             (filter remount?))
+                       loaded)]
+    [(into (set seeds) extra) extra]))
+
 (defrecord RemountStrategy []
   IReloadStrategy
   (-strategy-id [_] :remount)
@@ -133,34 +163,54 @@
     (let [id         (:addon/id spec)
           specs      (:hot/specs ctx)
           host       (:hot/host ctx)
+          driver     (:hot/mount-driver ctx)
           seeds      (set (:hot/seeds ctx #{id}))
           solve-opts (:hot/solve-opts ctx {})
           plan       (cascade/affected-plan specs seeds solve-opts)
           ordered    (:ordered plan)
-          ids        (mapv :addon/id ordered)
-          ns-res     (reload-namespaces! ctx (distinct (keep :addon/init-ns ordered)))]
-      (if-not (:ok? ns-res)
-        ;; Code that will not load must not take the running system down: refuse
-        ;; BEFORE any teardown, leaving every live instance in place.
-        (assoc (refusal (-strategy-id this) ctx (:errors ns-res))
+          ids        (mapv :addon/id ordered)]
+      (if-not (satisfies? hport/IMountDriver driver)
+        ;; No host adapter, no remount. Refusing here leaves every live instance
+        ;; in place; tearing down a slice nothing can rebuild would not.
+        (assoc (refusal (-strategy-id this) ctx
+                        [(str id ": no :hot/mount-driver in the reload context —"
+                              " the host must inject an IMountDriver")])
                :hot/affected ids)
-        ;; Reverse-order shutdown, then re-drive the ORDINARY mount pipeline over
-        ;; the affected slice. mount! re-resolves each constructor at call time,
-        ;; so the freshly loaded code is what gets constructed. :peer-specs keeps
-        ;; sibling injection resolving against the WHOLE system, not the slice.
-        (let [td     (boundary/teardown! host ids)
-              report (boundary/mount! plan host
-                                      (assoc (:hot/mount-opts ctx {})
-                                             :peer-specs specs))
-              errors (into (vec (:errors td)) (mount-errors report))]
-          (cond-> (assoc (base-report (-strategy-id this) ctx)
-                         :hot/affected ids
-                         :hot/torn-down (vec (:torn-down td))
-                         :hot/ns-reloaded (vec (:loaded ns-res))
-                         :mounted (vec (:mounted report))
-                         :ok? (and (:ok? report) (empty? (:errors td))))
-            (seq (:cycles plan)) (assoc :hot/cycles (:cycles plan))
-            (seq errors)         (assoc :errors (vec errors))))))))
+        (let [ns-res (reload-namespaces! ctx (distinct (keep :addon/init-ns ordered)))]
+          (if-not (:ok? ns-res)
+            ;; Code that will not load must not take the running system down: refuse
+            ;; BEFORE any teardown, leaving every live instance in place.
+            (assoc (refusal (-strategy-id this) ctx (:errors ns-res))
+                   :hot/affected ids)
+            ;; The slice is re-derived from what the reload ACTUALLY loaded, before
+            ;; the teardown that acts on it — a widened plan must be in hand while
+            ;; every instance is still live.
+            (let [loaded           (mapv str (:loaded ns-res))
+                  [seeds' widened] (widen-seeds specs seeds (set ids) loaded
+                                                (-strategy-id this))
+                  plan             (if (seq widened)
+                                     (cascade/affected-plan specs seeds' solve-opts)
+                                     plan)
+                  ordered          (:ordered plan)
+                  ids              (mapv :addon/id ordered)
+                  ;; Reverse-order shutdown, then re-drive the ORDINARY mount pipeline over
+                  ;; the affected slice. mount! re-resolves each constructor at call time,
+                  ;; so the freshly loaded code is what gets constructed. :peer-specs keeps
+                  ;; sibling injection resolving against the WHOLE system, not the slice.
+                  td               (hport/-teardown! driver host ids)
+                  report           (hport/-mount! driver plan host
+                                                  (assoc (:hot/mount-opts ctx {})
+                                                         :peer-specs specs))
+                  errors           (into (vec (:errors td)) (mount-errors report))]
+              (cond-> (assoc (base-report (-strategy-id this) ctx)
+                             :hot/affected ids
+                             :hot/torn-down (vec (:torn-down td))
+                             :hot/ns-reloaded loaded
+                             :mounted (vec (:mounted report))
+                             :ok? (and (:ok? report) (empty? (:errors td))))
+                (seq widened)        (assoc :hot/widened widened)
+                (seq (:cycles plan)) (assoc :hot/cycles (:cycles plan))
+                (seq errors)         (assoc :errors (vec errors))))))))))
 
 ;; =============================================================================
 ;; Built-in strategy: :restart-required
@@ -171,7 +221,7 @@
   (-strategy-id [_] :restart-required)
   (-applies? [_ _spec ctx]
     ;; A jar-backed or absent addon has no source that can change under a running
-    ;; JVM. Reloading it would reconstruct the SAME code and report success —
+    ;; host. Reloading it would reconstruct the SAME code and report success —
     ;; the most misleading outcome available. Refuse instead.
     (not (:hot/reloadable? (:hot/source ctx) true)))
   (-reload! [this spec ctx]

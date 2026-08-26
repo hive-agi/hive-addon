@@ -42,14 +42,25 @@
   (not (#{:native :foss} cls)))
 
 (defn- rule-credentials [config]
-  (for [[h cd] (:iaddon/credentials config)
-        :when  (some smuggled-step? (:chain cd))]
-    {:rule :literal-secret :credential h :detail "credential chain smuggles a literal value"}))
+  ;; `keep` rather than `for ... :when`: cljrs drops the :when clause silently,
+  ;; which in a LINT rule means every credential is reported as smuggling a
+  ;; literal — a rule that fires on everything is as useless as one that never
+  ;; fires, and neither errors.
+  (keep (fn [[h cd]]
+          (when (some smuggled-step? (:chain cd))
+            {:rule :literal-secret :credential h
+             :detail "credential chain smuggles a literal value"}))
+        (:iaddon/credentials config)))
 
 (defn- rule-plug-secrets [config]
-  (for [[lib plug] (:iaddon/plugs config)
-        k          (deep-secret-keys plug)]
-    {:rule :literal-secret :lib lib :detail (str "inline secret key " k "; use a :credential handle")}))
+  ;; `mapcat`/`map` rather than a two-binding `for`: cljrs leaves the second
+  ;; binding unbound.
+  (mapcat (fn [[lib plug]]
+            (map (fn [k]
+                   {:rule :literal-secret :lib lib
+                    :detail (str "inline secret key " k "; use a :credential handle")})
+                 (deep-secret-keys plug)))
+          (:iaddon/plugs config)))
 
 (defn- rule-source-provenance [config]
   (mapcat
@@ -66,9 +77,11 @@
    (:iaddon/plugs config)))
 
 (defn- rule-repo-userinfo [config]
-  (for [[id rd] (:iaddon/repos config)
-        :when   (re-find #"//[^/@\s]*:[^/@\s]*@" (str (:url rd)))]
-    {:rule :literal-secret :repo id :detail "credential embedded in repo :url userinfo"}))
+  (keep (fn [[id rd]]
+          (when (re-find #"//[^/@\s]*:[^/@\s]*@" (str (:url rd)))
+            {:rule :literal-secret :repo id
+             :detail "credential embedded in repo :url userinfo"}))
+        (:iaddon/repos config)))
 
 (def ^:private rules
   [rule-credentials rule-plug-secrets rule-source-provenance rule-repo-userinfo])

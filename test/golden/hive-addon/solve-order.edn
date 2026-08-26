@@ -1,0 +1,7 @@
+{:capability
+ {:ordered ["provider" "consumer"], :cycles [], :missing {}},
+ :cyclic {:ordered ["free"], :cycles ["x" "y"], :missing {}},
+ :dangling
+ {:ordered ["only"], :cycles [], :missing {"only" ["never-mounted"]}},
+ :diamond {:ordered ["a" "b" "c" "d"], :cycles [], :missing {}},
+ :reverse-alpha {:ordered ["c" "b" "a"], :cycles [], :missing {}}}

@@ -100,6 +100,12 @@
    first. :mounted carries the per-addon MountResult from the ORDINARY mount
    pipeline — hot-reload is a projection of mount!, not a second registry.
 
+   :hot/ns-reloaded names every namespace the reloader loaded, which is not
+   bounded by the seeds: an image-wide reloader loads whatever changed on disk.
+   :hot/widened is the addon ids that joined :hot/affected for that reason —
+   absent when the reload stayed inside the requested slice, so \"nothing else
+   changed\" and \"other addons were dragged in\" are distinguishable.
+
    :hot/strategy names the strategy that ran. :teardown/data-preserved? inherits
    the no-nuke invariant: [:= true]. Open."
   [:map {:closed false}
@@ -111,10 +117,43 @@
    [:hot/torn-down [:sequential s/AddonId]]
    [:hot/cycles {:optional true} [:set s/AddonId]]
    [:hot/ns-reloaded {:optional true} [:sequential :string]]
+   [:hot/widened {:optional true} [:set s/AddonId]]
    [:teardown/data-preserved? [:= true]]
    [:mounted [:sequential ms/MountResult]]
    [:ok? :boolean]
    [:errors {:optional true} [:sequential :string]]])
+
+;; =============================================================================
+;; Port-layer and pure-stratum shapes
+;; =============================================================================
+
+(def AddonIdSet
+  "A set of addon ids — a reload's seed set, and the closure it produces."
+  [:set s/AddonId])
+
+(def MountSpecs
+  "The mounted manifest slice a reload reasons over."
+  [:sequential ms/MountSpec])
+
+(def DependentsArgs
+  "Arglist of hive-addon.hot.cascade/dependents: the specs, then the seed ids.
+   A :cat schema, so a schema-driven test applies the subject rather than
+   passing the pair as one argument."
+  [:cat MountSpecs AddonIdSet])
+
+(def TeardownOutcome
+  "What hive-addon.hot.port/IMountDriver's -teardown! reports."
+  [:map {:closed false}
+   [:torn-down [:sequential s/AddonId]]
+   [:errors {:optional true} [:sequential :string]]])
+
+(def NsReloadOutcome
+  "What hive-addon.hot.port/INsReloader's -reload-nss! reports. :failed names the
+   namespace a reload stopped at; its absence means every namespace loaded."
+  [:map {:closed false}
+   [:loaded [:sequential :any]]
+   [:failed {:optional true} [:maybe :any]]
+   [:error {:optional true} [:maybe :string]]])
 
 ;; =============================================================================
 ;; Local composite registry — mount.schema registry + :hot/* schemas
@@ -122,13 +161,18 @@
 
 (def ^:private hot-schemas
   "Static :hot/* -> schema map seeded into the local registry."
-  {:hot/trigger        HotTrigger
-   :hot/strategy-id    StrategyId
-   :hot/source-kind    SourceKind
-   :hot/source         AddonSource
-   :hot/registration   HotRegistration
-   :hot/report         HotReport
-   :hot/remount-report RemountReport})
+  {:hot/trigger            HotTrigger
+   :hot/strategy-id        StrategyId
+   :hot/source-kind        SourceKind
+   :hot/source             AddonSource
+   :hot/registration       HotRegistration
+   :hot/report             HotReport
+   :hot/remount-report     RemountReport
+   :hot/addon-id-set       AddonIdSet
+   :hot/specs              MountSpecs
+   :hot/dependents-args    DependentsArgs
+   :hot/teardown-outcome   TeardownOutcome
+   :hot/ns-reload-outcome  NsReloadOutcome})
 
 (def registry
   "Composite malli registry: hive-addon.mount.schema's registry (malli defaults +

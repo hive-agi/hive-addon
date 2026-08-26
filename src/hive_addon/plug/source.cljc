@@ -28,13 +28,16 @@
   ISource
   (family   [_] :git)
   (local?   [_] false)
-  (mutable? [_] (not (valid-sha? sha))))
+  ;; `(:sha this)`, not the bare field symbol `sha`: cljrs does not bind a
+  ;; defrecord's fields as symbols inside its method bodies (it answers
+  ;; `unbound symbol: sha`), while keyword access on `this` works everywhere.
+  (mutable? [this] (not (valid-sha? (:sha this)))))
 
 (defrecord MvnDep [version]
   ISource
   (family   [_] :mvn)
   (local?   [_] false)
-  (mutable? [_] (mutable-version? version)))
+  (mutable? [this] (mutable-version? (:version this))))
 
 (defn coord->source
   "ISource value object for a tools.deps coord, or nil for an unknown coord."

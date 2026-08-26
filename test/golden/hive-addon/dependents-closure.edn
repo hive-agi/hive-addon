@@ -1,0 +1,5 @@
+{:seed-absent ["nope"],
+ :seed-leaf ["c"],
+ :seed-middle ["b" "c"],
+ :seed-root ["a" "b" "c"],
+ :seed-split ["a" "b" "c"]}
