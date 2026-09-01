@@ -65,6 +65,7 @@
    :hot/strategy strategy-id
    :hot/changed-ns (:hot/changed-ns ctx)
    :hot/seeds (set (:hot/seeds ctx))
+   :hot/roots (vec (:hot/roots ctx []))
    :hot/affected []
    :hot/torn-down []
    :teardown/data-preserved? true
@@ -87,7 +88,10 @@
    namespaces have not already been reloaded (a hive-hot component callback fires
    AFTER clj-reload has done the ns work, so doing it again would be waste).
 
-   Returns {:ok? bool :loaded [...] :errors [...]}."
+   Returns {:ok? bool :loaded [...] :errors [...]} plus, when the reloader
+   answers them, :skipped (changed outside the reload's roots, declined),
+   :dragged (changed outside, loaded as dependents), :multi-file (a loaded
+   namespace found in more than one file) and :unchanged? (nothing to load)."
   [ctx ns-strs]
   (cond
     (:hot/ns-reloaded? ctx)
@@ -100,10 +104,71 @@
     (let [res (r/try-effect ((:hot/reload-ns! ctx) ns-strs))]
       (if (r/err? res)
         {:ok? false :loaded [] :errors [(str "namespace reload failed: " (:message res))]}
-        (let [{:keys [loaded failed] :as out} (:ok res)]
+        (let [{:keys [loaded failed skipped dragged multi-file] :as out} (:ok res)]
           (cond-> {:ok? (nil? failed) :loaded (vec loaded)}
             failed (assoc :errors [(str "namespace reload failed at: " failed
-                                        (when-let [e (:error out)] (str " — " e)))])))))))
+                                        (when-let [e (:error out)] (str " — " e)))])
+            (seq skipped)    (assoc :skipped (mapv str skipped))
+            (seq dragged)    (assoc :dragged (mapv str dragged))
+            (seq multi-file) (assoc :multi-file
+                                    (into {}
+                                          (map (fn [[k v]] [(str k) (mapv str v)]))
+                                          multi-file))
+            (contains? out :unchanged?) (assoc :unchanged? (boolean (:unchanged? out)))))))))
+
+(defn- constructor-roots
+  "{init-ns-string -> current root of the constructor var}, through the
+   injected :hot/ctor-probe, for the specs whose constructor resolves. Empty
+   without a probe. Read BEFORE and AFTER a namespace reload: a namespace the
+   reload claims to have loaded whose constructor root is the SAME object was
+   not actually re-evaluated."
+  [ctx ordered]
+  (if-let [probe (:hot/ctor-probe ctx)]
+    (into {}
+          (keep (fn [spec]
+                  (let [init-ns (:addon/init-ns spec)]
+                    (when-let [root (probe init-ns (:addon/init-fn spec))]
+                      [(str init-ns) root]))))
+          ordered)
+    {}))
+
+(defn- stale-constructors
+  "The init-ns strings among `loaded` whose constructor root is identical in
+   `before` and `after` — reported loaded, provably not re-evaluated."
+  [before after loaded]
+  (into []
+        (comp (map str)
+              (distinct)
+              (filter (fn [ns]
+                        (and (contains? before ns)
+                             (contains? after ns)
+                             (identical? (get before ns) (get after ns))))))
+        loaded))
+
+(defn- with-ns-outcome
+  "Fold what the namespace reloader answered beyond :loaded into a report."
+  [report ns-res]
+  (cond-> report
+    (seq (:skipped ns-res))        (assoc :hot/ns-skipped (vec (:skipped ns-res)))
+    (seq (:dragged ns-res))        (assoc :hot/ns-dragged (vec (:dragged ns-res)))
+    (seq (:multi-file ns-res))     (assoc :hot/multi-file (:multi-file ns-res))
+    (contains? ns-res :unchanged?) (assoc :hot/ns-unchanged? (:unchanged? ns-res))))
+
+(defn- stale-refusal
+  "Refuse a reload whose namespace pass claimed more than it did: the image
+   still holds the previous constructor, so remounting would rebuild from OLD
+   code and report success — the false assurance this bridge exists to prevent."
+  [strategy-id ctx ids ns-res stale]
+  (-> (refusal strategy-id ctx
+               [(str "namespace reload reported " (pr-str stale)
+                     " loaded, but the constructor var did not change — the running"
+                     " image still holds the previous code. A second file may shadow"
+                     " the namespace (see :hot/multi-file), or the reloader answered"
+                     " without loading.")])
+      (assoc :hot/affected ids
+             :hot/stale-ctors stale
+             :hot/ns-reloaded (mapv str (:loaded ns-res)))
+      (with-ns-outcome ns-res)))
 
 ;; =============================================================================
 ;; Built-in strategy: :remount (the default)
@@ -176,12 +241,23 @@
                         [(str id ": no :hot/mount-driver in the reload context —"
                               " the host must inject an IMountDriver")])
                :hot/affected ids)
-        (let [ns-res (reload-namespaces! ctx (distinct (keep :addon/init-ns ordered)))]
-          (if-not (:ok? ns-res)
+        (let [before (when-not (:hot/ns-reloaded? ctx) (constructor-roots ctx ordered))
+              ns-res (reload-namespaces! ctx (distinct (keep :addon/init-ns ordered)))
+              stale  (when before
+                       (stale-constructors before (constructor-roots ctx ordered)
+                                           (:loaded ns-res)))]
+          (cond
             ;; Code that will not load must not take the running system down: refuse
             ;; BEFORE any teardown, leaving every live instance in place.
-            (assoc (refusal (-strategy-id this) ctx (:errors ns-res))
-                   :hot/affected ids)
+            (not (:ok? ns-res))
+            (-> (refusal (-strategy-id this) ctx (:errors ns-res))
+                (assoc :hot/affected ids)
+                (with-ns-outcome ns-res))
+
+            (seq stale)
+            (stale-refusal (-strategy-id this) ctx ids ns-res stale)
+
+            :else
             ;; The slice is re-derived from what the reload ACTUALLY loaded, before
             ;; the teardown that acts on it — a widened plan must be in hand while
             ;; every instance is still live.
@@ -202,12 +278,13 @@
                                                   (assoc (:hot/mount-opts ctx {})
                                                          :peer-specs specs))
                   errors           (into (vec (:errors td)) (mount-errors report))]
-              (cond-> (assoc (base-report (-strategy-id this) ctx)
-                             :hot/affected ids
-                             :hot/torn-down (vec (:torn-down td))
-                             :hot/ns-reloaded loaded
-                             :mounted (vec (:mounted report))
-                             :ok? (and (:ok? report) (empty? (:errors td))))
+              (cond-> (-> (base-report (-strategy-id this) ctx)
+                          (assoc :hot/affected ids
+                                 :hot/torn-down (vec (:torn-down td))
+                                 :hot/ns-reloaded loaded
+                                 :mounted (vec (:mounted report))
+                                 :ok? (and (:ok? report) (empty? (:errors td))))
+                          (with-ns-outcome ns-res))
                 (seq widened)        (assoc :hot/widened widened)
                 (seq (:cycles plan)) (assoc :hot/cycles (:cycles plan))
                 (seq errors)         (assoc :errors (vec errors))))))))))
@@ -248,12 +325,19 @@
   (-applies? [_ _spec _ctx] false)
   (-reload! [this spec ctx]
     (let [id     (:addon/id spec)
-          ns-res (reload-namespaces! ctx [(:addon/init-ns spec)])]
-      (cond-> (assoc (base-report (-strategy-id this) ctx)
-                     :hot/affected [id]
-                     :hot/ns-reloaded (vec (:loaded ns-res))
-                     :ok? (:ok? ns-res))
-        (seq (:errors ns-res)) (assoc :errors (vec (:errors ns-res)))))))
+          before (when-not (:hot/ns-reloaded? ctx) (constructor-roots ctx [spec]))
+          ns-res (reload-namespaces! ctx [(:addon/init-ns spec)])
+          stale  (when before
+                   (stale-constructors before (constructor-roots ctx [spec])
+                                       (:loaded ns-res)))]
+      (if (seq stale)
+        (stale-refusal (-strategy-id this) ctx [id] ns-res stale)
+        (cond-> (-> (base-report (-strategy-id this) ctx)
+                    (assoc :hot/affected [id]
+                           :hot/ns-reloaded (mapv str (:loaded ns-res))
+                           :ok? (:ok? ns-res))
+                    (with-ns-outcome ns-res))
+          (seq (:errors ns-res)) (assoc :errors (vec (:errors ns-res))))))))
 
 ;; =============================================================================
 ;; Built-in strategy: :inert

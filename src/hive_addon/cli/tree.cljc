@@ -49,25 +49,34 @@
     (str "Available commands:\n"
          (str/join "\n" (map #(str "  - " (str/join " " (map name %))) sorted)))))
 
+(defn- handler?
+  "Is `x` a handler node — something invokable that is not itself a subtree or
+   a data literal? A fn or a Var qualifies (a Var resolves through to the
+   current fn at call time); a map is a subtree, and keywords/symbols/colls are
+   `ifn?` without being handlers."
+  [x]
+  (and (ifn? x) (not (coll? x)) (not (keyword? x)) (not (symbol? x))))
+
 (defn resolve-handler
   "Walk HANDLERS along PATH.
 
    Returns {:handler fn :path-used [...] :remaining [...]} on a hit,
    {:tree subtree :path-used [...]} when the path stops at a subtree with no
    :_handler, or {:error :not-found :path-used [...] :remaining [...]} when a
-   segment does not match and no :_handler is available."
+   segment does not match and no :_handler is available. A handler node is
+   anything `handler?` admits — a fn or a Var."
   [handlers path]
   (loop [tree handlers
          used []
          remaining path]
     (if (empty? remaining)
-      (if-let [h (or (when (fn? tree) tree) (get tree :_handler))]
+      (if-let [h (or (when (handler? tree) tree) (get tree :_handler))]
         {:handler h :path-used used :remaining []}
         {:tree tree :path-used used})
       (let [seg (first remaining)
             next-node (get tree seg)]
         (cond
-          (fn? next-node)
+          (handler? next-node)
           {:handler next-node :path-used (conj used seg)
            :remaining (vec (rest remaining))}
 

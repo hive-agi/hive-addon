@@ -88,15 +88,23 @@
           ns-strs))
 
 (defn ns-reloader
-  "The namespace-level reloader injected into strategies.
+  "The namespace-level reloader injected into strategies, for a reload whose
+   seeds' source lives under `roots` (their classpath source dirs).
 
-   Prefers hive-hot's clj-reload-backed `reload!`, which reloads every CHANGED
-   namespace and cascades to their dependents properly. Falls back to plain
-   `require :reload` over the given namespaces when hive-hot is absent."
-  []
-  (if-let [reload! (hot-var 'hive-hot.core/reload!)]
-    (fn [_ns-strs] (reload!))
-    require-reload!))
+   Prefers hive-hot's `reload-scoped!`: the changes under the roots plus every
+   namespace that depends on them, and NOTHING else — a change another session
+   left under some other watched root is declined and reported under :skipped
+   rather than loaded on this caller's behalf. Falls back to hive-hot's
+   image-wide `reload!` when the scoped entry point is absent (an older
+   hive-hot), then to plain `require :reload` over the given namespaces when
+   hive-hot is absent altogether."
+  ([] (ns-reloader nil))
+  ([roots]
+   (if-let [scoped! (and (seq roots) (hot-var 'hive-hot.core/reload-scoped!))]
+     (fn [_ns-strs] (scoped! (vec roots)))
+     (if-let [reload! (hot-var 'hive-hot.core/reload!)]
+       (fn [_ns-strs] (reload!))
+       require-reload!))))
 
 ;; =============================================================================
 ;; Context
@@ -116,14 +124,34 @@
    So they are FOLDED into :mount-opts rather than dropped."
   #{:resolve-config :init-retry :license-gate :on-event :sleep-fn :peer-specs})
 
+(defn constructor-probe
+  "Current root value of the constructor var `init-fn` in `init-ns`, or nil.
+   Resolves without loading anything: a probe must never itself trigger the
+   load it exists to verify. Injected into the reload context as
+   :hot/ctor-probe so the strategies can check a reload's claim against what
+   actually changed."
+  [init-ns init-fn]
+  (some-> (find-ns (symbol (str init-ns)))
+          (ns-resolve (symbol (str init-fn)))
+          var-get))
+
+(defn- seed-roots
+  "Classpath source dirs of the seed addons — what the namespace reload is
+   scoped to. Jar-backed and absent seeds contribute nothing."
+  [specs seeds]
+  (vec (source/watchable-dirs (filter #(contains? seeds (:addon/id %)) specs))))
+
 (defn- reload-ctx
   [host specs spec seeds {:keys [trigger changed-ns ns-reloaded? mount-opts
-                                 solve-opts strategies reload-ns! mount-driver]
+                                 solve-opts strategies reload-ns! mount-driver
+                                 ctor-probe]
                           :as opts}]
-  (let [stray (select-keys opts mount-opt-keys)]
+  (let [stray (select-keys opts mount-opt-keys)
+        roots (seed-roots specs seeds)]
     {:hot/host host
      :hot/specs specs
      :hot/seeds seeds
+     :hot/roots roots
      :hot/source (source/spec-source spec)
      :hot/mount-driver (or mount-driver (driver/mount-driver))
      :hot/trigger (or trigger :manual)
@@ -133,7 +161,10 @@
      :hot/mount-opts (merge stray (or mount-opts {}))
      :hot/solve-opts (or solve-opts {})
      :hot/strategies strategies
-     :hot/reload-ns! (or reload-ns! (ns-reloader))}))
+     :hot/reload-ns! (or reload-ns! (ns-reloader roots))
+     ;; The probe verifies the DEFAULT reloader's claim. A caller that injects
+     ;; its own reloader answers for it — unless it injects a probe as well.
+     :hot/ctor-probe (or ctor-probe (when-not reload-ns! constructor-probe))}))
 
 (defn- not-found-report
   [addon-id opts]

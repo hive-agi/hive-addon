@@ -78,6 +78,41 @@ hive-addon.mount/compose-classpath! accept :on-event for structured lifecycle
 events and :sleep-fn for deterministic tests. Mount results report
 :init-attempts.
 
+## Hot reload and injection
+
+`hive-addon.hot` rebuilds a mounted addon from its manifest when its code
+changes, and cascades to every addon that was handed its instance. hive-hot is
+a SOFT dependency: with it on the classpath the namespace reload is delegated
+to `hive-hot.core/reload-scoped!`, scoped to the seeds' own source roots: a
+change another session left under some other watched root is declined and
+reported under `:hot/ns-skipped`, never loaded on the caller's behalf.
+
+~~~clojure
+(require '[hive-addon.hot :as hot])
+
+(hot/reload-addon! host specs "my.addon" {:mount-opts {:resolve-config my-resolver}})
+;; => RemountReport: :hot/affected, :hot/torn-down, :mounted,
+;;    :hot/ns-reloaded / :hot/ns-skipped / :hot/ns-dragged, :hot/stale-ctors ...
+~~~
+
+A reload whose namespace pass claims a load that did not happen (the
+constructor var is provably the same object afterwards) is REFUSED
+(`:hot/stale-ctors`) instead of remounting from old code and reporting success.
+
+`hive-addon.hot.inject/inject!` mounts an addon that was not on the classpath
+at boot: it puts the project's `deps.edn :paths` (or a source dir, or a jar) on
+the live DynamicClassLoader, discovers the manifests under those paths only,
+solves them against the mounted peers, remounts the mounted dependents that
+now have a new sibling to receive, and registers the new addons with hive-hot.
+
+~~~clojure
+(require '[hive-addon.hot.inject :as inject])
+
+(inject/inject! host mounted-specs "/path/to/addon-project"
+                {:mount-opts {:resolve-config my-resolver}})
+;; => InjectReport: :hot/injected, :hot/already-mounted, :hot/affected, :mounted ...
+~~~
+
 ## Releasing
 
 Bump `VERSION`, merge to `main` — CI tags `v<VERSION>` and cuts a GitHub release.
