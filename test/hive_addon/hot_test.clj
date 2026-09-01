@@ -630,3 +630,104 @@
                                    :reload-ns! (fn [nss] {:loaded nss})})]
     (is (:ok? report) (pr-str (:errors report)))
     (is (= :explicit (:probe/from (:config (port/registered host "probe.a")))))))
+
+;; =============================================================================
+;; Scoped namespace reload — what the reloader answers reaches the report
+;; =============================================================================
+
+(deftest the-reload-context-carries-the-seeds-source-roots
+  (testing "the namespace reload is scoped to where the SEEDS' constructors live"
+    (let [[host _] (mount-chain!)
+          report   (hot/reload-addon! host chain-specs "probe.a"
+                                      {:reload-ns! (fn [nss] {:loaded nss})})]
+      (is (:ok? report) (pr-str (:errors report)))
+      (is (= [(:hot/source-dir (source/resolve-source fixture-ns))]
+             (:hot/roots report))))))
+
+(deftest what-a-scoped-reloader-declined-or-dragged-is-named-in-the-report
+  (let [[host _] (mount-chain!)
+        report   (hot/reload-addon! host chain-specs "probe.a"
+                                    {:reload-ns! (fn [nss]
+                                                   {:loaded nss
+                                                    :skipped ['other.session.ns]
+                                                    :dragged ["dependent.ns"]
+                                                    :unchanged? false
+                                                    :multi-file {'shadowed.ns ["a.clj" "b.clj"]}})})]
+    (is (:ok? report) (pr-str (:errors report)))
+    (is (= ["other.session.ns"] (:hot/ns-skipped report)))
+    (is (= ["dependent.ns"] (:hot/ns-dragged report)))
+    (is (false? (:hot/ns-unchanged? report)))
+    (is (= {"shadowed.ns" ["a.clj" "b.clj"]} (:hot/multi-file report)))
+    (is (nil? (hs/humanize-errors hs/RemountReport report))
+        (pr-str (hs/humanize-errors hs/RemountReport report)))))
+
+(deftest a-remount-from-unchanged-source-says-so
+  (let [[host _] (mount-chain!)
+        report   (hot/reload-addon! host chain-specs "probe.a"
+                                    {:reload-ns! (fn [_] {:loaded [] :unchanged? true})})]
+    (is (:ok? report) (pr-str (:errors report)))
+    (is (true? (:hot/ns-unchanged? report)))
+    (testing "the instances are still rebuilt — the operator asked for a reload"
+      (is (= 2 (generation-of host "probe.a"))))))
+
+;; =============================================================================
+;; A reload that claims a load that did not happen is refused
+;; =============================================================================
+
+(deftest a-reported-load-whose-constructor-did-not-change-is-refused
+  (testing "the reloader says the namespace loaded; the constructor var is
+            provably the same object; remounting would rebuild from OLD code
+            and report success — so it is refused before any teardown"
+    (let [[host _] (mount-chain!)
+          report   (hot/reload-addon! host chain-specs "probe.a"
+                                      {:reload-ns! (fn [nss] {:loaded nss})
+                                       :ctor-probe (fn [_ns _fn] ::same-root)})]
+      (is (false? (:ok? report)))
+      (is (= [fixture-ns] (:hot/stale-ctors report)))
+      (is (some #(re-find #"did not change" %) (:errors report)))
+      (testing "nothing was torn down and every instance is the one that was live"
+        (is (empty? (:hot/torn-down report)))
+        (is (= [1 1 1] (mapv #(generation-of host %) ["probe.a" "probe.b" "probe.c"]))))
+      (is (nil? (hs/humanize-errors hs/RemountReport report))
+          (pr-str (hs/humanize-errors hs/RemountReport report))))))
+
+(deftest a-probe-that-sees-a-changed-constructor-lets-the-remount-proceed
+  (let [[host _] (mount-chain!)
+        counter  (atom 0)
+        report   (hot/reload-addon! host chain-specs "probe.a"
+                                    {:reload-ns! (fn [nss] {:loaded nss})
+                                     :ctor-probe (fn [_ns _fn] (swap! counter inc))})]
+    (is (:ok? report) (pr-str (:errors report)))
+    (is (nil? (:hot/stale-ctors report)))
+    (is (= 2 (generation-of host "probe.a")))))
+
+(deftest in-place-refuses-a-claimed-load-that-did-not-happen
+  (let [s      (spec "probe.a" "make-a" :addon/reload-strategy :in-place)
+        host   (mount/atom-mount-host)
+        _      (mount/mount! (mount/solve [s]) host)
+        report (hot/reload-addon! host [s] "probe.a"
+                                  {:reload-ns! (fn [nss] {:loaded nss})
+                                   :ctor-probe (fn [_ns _fn] ::same-root)})]
+    (is (false? (:ok? report)))
+    (is (= :in-place (:hot/strategy report)))
+    (is (= [fixture-ns] (:hot/stale-ctors report)))
+    (is (= 1 (generation-of host "probe.a")))))
+
+(deftest the-callback-path-does-not-probe-because-the-load-already-happened
+  (testing "a hive-hot component callback fires AFTER clj-reload loaded the
+            namespace; there is no before-state to compare, so no refusal"
+    (let [[host _] (mount-chain!)
+          report   (hot/reload-namespace! host chain-specs fixture-ns
+                                          {:ctor-probe (fn [_ns _fn] ::same-root)})]
+      (is (:ok? report) (pr-str (:errors report)))
+      (is (nil? (:hot/stale-ctors report)))
+      (is (= 2 (generation-of host "probe.a"))))))
+
+(deftest the-default-reloader-verifies-its-own-claim
+  (testing "with the default reloader the probe is on: an unchanged fixture
+            loads nothing, so nothing is stale and the remount proceeds"
+    (let [[host _] (mount-chain!)
+          report   (hot/reload-addon! host chain-specs "probe.a")]
+      (is (:ok? report) (pr-str (:errors report)))
+      (is (nil? (:hot/stale-ctors report)))
+      (is (= 2 (generation-of host "probe.a"))))))

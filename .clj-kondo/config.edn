@@ -1,0 +1,11 @@
+;; clj-kondo config for hive-addon.
+;;
+;; Macro hooks are NOT authored here. hive-dsl ships them as an exported config
+;; (clj-kondo.exports/io.github.hive-agi/hive-dsl in its jar), and clj-kondo
+;; imports it under .clj-kondo/imports/ from the classpath:
+;;
+;;   clj-kondo --lint "$(clojure -Spath)" --dependencies --parallel --copy-configs
+;;
+;; A hand-copied hook here would be a second definition of the same macro
+;; semantics, drifting on every hive-dsl release.
+{}

@@ -100,11 +100,21 @@
    first. :mounted carries the per-addon MountResult from the ORDINARY mount
    pipeline — hot-reload is a projection of mount!, not a second registry.
 
-   :hot/ns-reloaded names every namespace the reloader loaded, which is not
-   bounded by the seeds: an image-wide reloader loads whatever changed on disk.
-   :hot/widened is the addon ids that joined :hot/affected for that reason —
-   absent when the reload stayed inside the requested slice, so \"nothing else
-   changed\" and \"other addons were dragged in\" are distinguishable.
+   :hot/roots are the seeds' classpath source dirs the namespace reload was
+   scoped to. :hot/ns-reloaded names every namespace the reloader loaded;
+   :hot/ns-skipped the namespaces changed OUTSIDE the roots that it declined
+   (they stay pending for their own root), :hot/ns-dragged the ones changed
+   outside but loaded because they depend on a reloaded namespace, and
+   :hot/ns-unchanged? that nothing under the roots had changed at all.
+   :hot/widened is the addon ids that joined :hot/affected because their
+   constructor namespace was loaded — absent when the reload stayed inside the
+   requested slice, so \"nothing else changed\" and \"other addons were dragged
+   in\" are distinguishable.
+
+   :hot/multi-file names a loaded namespace found in more than one file, and
+   :hot/stale-ctors the namespaces the reload reported loaded whose constructor
+   var provably did not change — both are the \"reloaded, but the code did not\"
+   shape, and the second REFUSES the remount.
 
    :hot/strategy names the strategy that ran. :teardown/data-preserved? inherits
    the no-nuke invariant: [:= true]. Open."
@@ -113,13 +123,56 @@
    [:hot/strategy StrategyId]
    [:hot/changed-ns {:optional true} [:maybe [:string {:min 1}]]]
    [:hot/seeds [:set s/AddonId]]
+   [:hot/roots {:optional true} [:sequential :string]]
    [:hot/affected [:sequential s/AddonId]]
    [:hot/torn-down [:sequential s/AddonId]]
    [:hot/cycles {:optional true} [:set s/AddonId]]
    [:hot/ns-reloaded {:optional true} [:sequential :string]]
+   [:hot/ns-skipped {:optional true} [:sequential :string]]
+   [:hot/ns-dragged {:optional true} [:sequential :string]]
+   [:hot/ns-unchanged? {:optional true} :boolean]
+   [:hot/multi-file {:optional true} [:map-of :string [:sequential :string]]]
+   [:hot/stale-ctors {:optional true} [:sequential :string]]
    [:hot/widened {:optional true} [:set s/AddonId]]
    [:teardown/data-preserved? [:= true]]
    [:mounted [:sequential ms/MountResult]]
+   [:ok? :boolean]
+   [:errors {:optional true} [:sequential :string]]])
+
+(def InjectReport
+  "Outcome of injecting addons that were not on the classpath at boot
+   (hive-addon.hot.inject/inject!).
+
+   :hot/paths are the classpath entries the path stood for and :hot/classpath
+   what extending the live loader with each answered. :hot/discovered is every
+   addon whose manifest lives under those paths; :hot/already-mounted the ones
+   the host already had (left alone — injection never resurrects or replaces),
+   :hot/injected the ones actually mounted. :hot/affected is the ordered slice
+   that ran: the injected addons plus every ALREADY-MOUNTED dependent that now
+   has a new sibling to receive, which is torn down and remounted (listed in
+   :hot/torn-down). :mounted carries the per-addon MountResult from the
+   ordinary mount pipeline. :hot/dirs-added are the source dirs handed to
+   hive-hot so the new addons reload like the rest; :hot/registered the ids
+   registered as hive-hot components. :teardown/data-preserved? inherits the
+   no-nuke invariant: [:= true]. Open."
+  [:map {:closed false}
+   [:hot/path :string]
+   [:hot/paths [:sequential :string]]
+   [:hot/classpath [:sequential [:map {:closed false}
+                                 [:url :string]
+                                 [:already? :boolean]]]]
+   [:hot/discovered [:sequential s/AddonId]]
+   [:hot/already-mounted [:sequential s/AddonId]]
+   [:hot/injected [:sequential s/AddonId]]
+   [:hot/affected [:sequential s/AddonId]]
+   [:hot/torn-down [:sequential s/AddonId]]
+   [:hot/missing {:optional true} [:map-of :any :any]]
+   [:hot/dirs-added [:sequential :string]]
+   [:hot/registered [:sequential s/AddonId]]
+   [:hot/deps {:optional true} [:map {:closed false} [:ok? :boolean]]]
+   [:teardown/data-preserved? [:= true]]
+   [:mounted [:sequential ms/MountResult]]
+   [:discovery-errors {:optional true} [:sequential :any]]
    [:ok? :boolean]
    [:errors {:optional true} [:sequential :string]]])
 
@@ -149,11 +202,17 @@
 
 (def NsReloadOutcome
   "What hive-addon.hot.port/INsReloader's -reload-nss! reports. :failed names the
-   namespace a reload stopped at; its absence means every namespace loaded."
+   namespace a reload stopped at; its absence means every namespace loaded.
+   A scoped reloader may add :skipped / :dragged (namespaces changed outside
+   its roots, declined / loaded as dependents), :unchanged? and :multi-file."
   [:map {:closed false}
    [:loaded [:sequential :any]]
    [:failed {:optional true} [:maybe :any]]
-   [:error {:optional true} [:maybe :string]]])
+   [:error {:optional true} [:maybe :string]]
+   [:skipped {:optional true} [:sequential :any]]
+   [:dragged {:optional true} [:sequential :any]]
+   [:unchanged? {:optional true} :boolean]
+   [:multi-file {:optional true} [:map-of :any [:sequential :any]]]])
 
 ;; =============================================================================
 ;; Local composite registry — mount.schema registry + :hot/* schemas
@@ -168,6 +227,7 @@
    :hot/registration       HotRegistration
    :hot/report             HotReport
    :hot/remount-report     RemountReport
+   :hot/inject-report      InjectReport
    :hot/addon-id-set       AddonIdSet
    :hot/specs              MountSpecs
    :hot/dependents-args    DependentsArgs

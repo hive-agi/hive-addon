@@ -70,15 +70,18 @@
 
 (def ToolDef
   "A single MCP tool definition contributed by (tools addon). :inputSchema is
-   the JSON-schema-ish map the host forwards; :handler is an arbitrary fn. Open
-   — some addons carry extra keys. Only :name is required: :handler/:inputSchema
-   are OPTIONAL BY DESIGN because a :mcp-bridge/:external addon's executable
-   handler is supplied by the host transport, not the tool-def."
+   the JSON-schema-ish map the host forwards; :handler is anything invokable —
+   a fn OR a Var, so a dispatch entry can resolve through the var at call time
+   instead of capturing the fn at wiring time (the same `ifn?` the registry's
+   own precondition accepts). Open — some addons carry extra keys. Only :name
+   is required: :handler/:inputSchema are OPTIONAL BY DESIGN because a
+   :mcp-bridge/:external addon's executable handler is supplied by the host
+   transport, not the tool-def."
   [:map {:closed false}
    [:name [:string {:min 1}]]
    [:description {:optional true} :string]
    [:inputSchema {:optional true} [:map {:closed false}]]
-   [:handler {:optional true} fn?]])
+   [:handler {:optional true} ifn?]])
 
 (def Tools
   "Return shape of (tools addon): a sequence of tool-defs (may be empty)."
