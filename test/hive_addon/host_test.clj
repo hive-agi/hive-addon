@@ -105,6 +105,25 @@
   (testing "the default docstring names the host symbol"
     (is (re-find #"totally\.absent\.ns/nope" (:doc (meta #'missing))))))
 
+;; =============================================================================
+;; Declared symbols: what a namespace claims of its host, as data
+;; =============================================================================
+
+(deftest declared-symbols-test
+  (let [declared (host/declared-symbols 'hive-addon.host-test)]
+    (is (= 'clojure.core/+ (get declared 'plus)))
+    (is (= 'totally.absent.ns/nope (get declared 'missing)))
+    (is (= 'totally.absent.ns/nope (get declared 'missing-degraded)))
+    (testing "only defsoft vars are listed"
+      (is (not (contains? declared 'install-host!))))))
+
+(deftest unresolvable-names-the-var-and-the-symbol-test
+  (let [bad (host/unresolvable ['hive-addon.host-test])]
+    (is (= 'totally.absent.ns/nope (get bad 'hive-addon.host-test/missing))
+        "an unresolvable host symbol is reported against the var that declares it")
+    (is (not (contains? bad 'hive-addon.host-test/plus))
+        "a resolvable one is not reported")))
+
 (deftest api-builds-a-var-map-test
   (let [m (host/api {:plus 'clojure.core/+
                      :gone 'totally.absent.ns/nope

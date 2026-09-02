@@ -69,10 +69,40 @@
 
    `sym` is evaluated, so quote it: (defsoft edges 'hive-mcp.kg/edges).
    Options: `:absent`, a fn called with the same args when the host is absent;
-   `:doc`, a docstring."
+   `:doc`, a docstring.
+
+   The var carries the host symbol as `:host/sym` metadata, so a suite can
+   enumerate what a namespace claims of its host and check every one of them
+   resolves. Without that check a misspelled host symbol is indistinguishable
+   from an absent host: it degrades quietly instead of failing to compile."
   [name sym & {:keys [absent doc]}]
-  `(def ~(with-meta name {:doc (or doc (str "Soft-resolved host fn: " sym))})
+  `(def ~(with-meta name {:doc (or doc (str "Soft-resolved host fn: " sym))
+                          :host/sym sym})
      (soft ~sym ~absent)))
+
+(defn declared-symbols
+  "Every host symbol declared by `defsoft` in namespace `ns-sym`, as
+   {var-name host-symbol}. The namespace must already be loaded."
+  [ns-sym]
+  (reduce-kv (fn [acc var-name v]
+               (if-let [sym (:host/sym (meta v))]
+                 (assoc acc var-name sym)
+                 acc))
+             {}
+             (ns-publics ns-sym)))
+
+(defn unresolvable
+  "Of the host symbols `defsoft` declared across `ns-syms`, those that do NOT
+   resolve right now, as {var-symbol host-symbol}.
+
+   With the host on the classpath this must be empty: a symbol left over from a
+   host rename, or mistyped, would otherwise degrade silently forever."
+  [ns-syms]
+  (into {}
+        (for [ns-sym ns-syms
+              [var-name sym] (declared-symbols ns-sym)
+              :when (nil? (resolve-var sym))]
+          [(symbol (str ns-sym) (str var-name)) sym])))
 
 (defn api
   "Build a var-map of soft fns from `{k sym}` or `{k [sym absent-fn]}`.
