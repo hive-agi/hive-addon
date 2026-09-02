@@ -348,4 +348,15 @@
       (is (clojure.string/includes? src "(ns kernel-entry"))))
   (testing "and it reads back as forms, so a build cannot fail on a typo here"
     (let [src (opaque/entry-source [] 'acme.kernel/make)]
-      (is (= 2 (count (read-string (str "[" src "]"))))))))
+      (is (= 2 (count (read-string (str "[" src "]")))))))
+
+  (testing "the entry ns is a PARAMETER, because two build paths name it
+            differently and neither may be hardcoded"
+    ;; A vendor running `cljw build` takes the default. hive-native's opacity
+    ;; pipeline stages the entry as kernel-main and builds that symbol, so it
+    ;; passes its own name. Hardcoding either one makes this emitter unusable
+    ;; from the other path, which is how a second copy of the entry gets
+    ;; written and how the two copies then drift.
+    (let [src (opaque/entry-source '[[acme.kernel :as k]] 'acme.kernel/make 'kernel-main)]
+      (is (clojure.string/includes? src "(ns kernel-main"))
+      (is (clojure.string/includes? src "(serve/serve! (acme.kernel/make))")))))

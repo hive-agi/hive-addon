@@ -106,4 +106,7 @@
 
 (m/=> opaque/emit! [:=> [:cat os/OpaqueSpec :string] :string])
 
-(m/=> opaque/entry-source [:=> [:cat [:sequential :any] :symbol] :string])
+(m/=> opaque/entry-source
+      [:function
+       [:=> [:cat [:sequential :any] :symbol] :string]
+       [:=> [:cat [:sequential :any] :symbol :symbol] :string]])

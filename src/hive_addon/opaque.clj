@@ -153,16 +153,24 @@
 
    `requires` is a vector of ns forms for the vendor's own namespaces, e.g.
    [[acme.kernel :as k]], and `ctor-sym` is a fully qualified zero-argument
-   constructor returning an IAddon."
-  [requires ctor-sym]
-  (str "(ns kernel-entry\n"
-       "  (:require [hive-addon.opaque.serve :as serve]"
-       (when (seq requires)
-         (str "\n            " (str/join "\n            " (map pr-str requires))))
-       "))\n"
-       "\n"
-       ";; Top level on purpose: a cljw build artifact never calls an entry fn.\n"
-       "(serve/serve! (" (pr-str ctor-sym) "))\n"))
+   constructor returning an IAddon.
+
+   `entry-ns` is a parameter rather than a constant because there are two build
+   paths and they disagree about the name. A vendor calling `cljw build`
+   directly gets the default; hive-native's opacity pipeline stages the entry as
+   `kernel-main` and builds that symbol, so it passes its own. Hardcoding either
+   name makes this emitter unusable from the other path, which is how a second
+   copy of the entry shape gets written."
+  ([requires ctor-sym] (entry-source requires ctor-sym 'kernel-entry))
+  ([requires ctor-sym entry-ns]
+   (str "(ns " entry-ns "\n"
+        "  (:require [hive-addon.opaque.serve :as serve]"
+        (when (seq requires)
+          (str "\n            " (str/join "\n            " (map pr-str requires))))
+        "))\n"
+        "\n"
+        ";; Top level on purpose: a cljw build artifact never calls an entry fn.\n"
+        "(serve/serve! (" (pr-str ctor-sym) "))\n")))
 
 ;; =============================================================================
 ;; Re-exports, so a consumer needs one require
