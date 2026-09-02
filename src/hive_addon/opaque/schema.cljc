@@ -31,15 +31,23 @@
 
 (def WireVal
   "A value the wire carries, recursively: the JSON-ish subset MCP hands a tool
-   (nil, string, int, double, boolean, vector, map) plus keywords, so a param
-   map, a tool result, a health report and an addon config all fit. Doubles
-   exclude NaN/infinities, which do not round-trip through equality."
+   (nil, string, int, double, boolean, vector, map) plus keywords, symbols and
+   sets, so a param map, a tool result, a health report, a capability set and an
+   addon config all fit. Doubles exclude NaN and the infinities, which do not
+   round-trip through equality.
+
+   This schema and hive-addon.opaque.codec/safe? are the SAME judgement stated
+   twice, once for the host and once for the kernel, because the kernel cannot
+   load malli. `edn-safe` is contracted to return a WireVal
+   (hive-addon.opaque.contracts), which is where the two are held together: a
+   value codec admits and this schema rejects fails that contract."
   [:schema {:registry {::wire [:or
                                :nil :string :int
                                [:double {:gen/infinite? false :gen/NaN? false}]
-                               :boolean :keyword
+                               :boolean :keyword :symbol
                                [:vector [:ref ::wire]]
-                               [:map-of [:or :string :keyword] [:ref ::wire]]]}}
+                               [:set [:ref ::wire]]
+                               [:map-of [:or :string :keyword :symbol] [:ref ::wire]]]}}
    ::wire])
 
 (def Op

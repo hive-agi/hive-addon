@@ -218,6 +218,43 @@
   [t]
   (contains? valid-addon-types t))
 
+(def unimplemented-method-re
+  "Messages the hosts use for a protocol method that is not implemented.
+
+   Measured 2026-08-22. The JVM alone has TWO phrasings, which is why matching
+   one measured example is not enough, and the suite caught the second:
+     JVM defrecord \"Method p.Partial.b()Ljava/lang/Object; is abstract\"
+     JVM reify     \"Receiver class ...$reify__8710 does not define or inherit an
+                    implementation of the resolved method 'abstract java.lang.Object
+                    excluded_tools()' of interface hive_addon.protocol.IAddon.\"
+     JVM extend-*  \"No implementation of method: :b of protocol: ...\"
+     cljw          \"No implementation of method 'b' on protocol 'IThing' for type 'Partial'\"
+     cljrs         \"runtime error: No implementation of protocol IThing for type Partial\"
+   cljs contributes \"no protocol method\" / \"nothing implements\".
+
+   Matching the message rather than the exception CLASS is what makes this
+   portable: the class name differs per host and `AbstractMethodError` cannot
+   even be named off the JVM.
+
+   It lives HERE, beside the protocol whose optional methods it is about, so
+   that the two callers share one definition. hive-addon.schema needs it to
+   audit an addon against the contract; hive-addon.opaque.serve needs it to let
+   a kernel omit `excluded-tools`/`hooks` the same way the registry does, and
+   serve cannot reach schema (it is malli-free, so a cljw-built kernel carries
+   no schema runtime)."
+  #"(?i)is abstract|does not define or inherit an implementation|no implementation of (method|protocol)|no protocol method|nothing implements")
+
+(defn unimplemented-method?
+  "True when `t` is the error a host raises for an IAddon method the addon does
+   not implement, on any of the five hosts.
+
+   NOTE: a genuine \"is abstract\" / \"no implementation\" error raised from INSIDE
+   an implemented method body also reads as unimplemented here. That is an
+   accepted edge: the alternative is naming exception classes, which is not
+   portable at all."
+  [t]
+  (boolean (some->> (ex-message t) (re-find unimplemented-method-re))))
+
 ;; =============================================================================
 ;; Standard Capabilities
 ;; =============================================================================
