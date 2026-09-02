@@ -19,7 +19,36 @@
 
    JVM-only (.clj): it reaches the subprocess transport and writes manifest
    files. The strata below it are .cljc, and the two the KERNEL loads
-   (hive-addon.opaque.codec, hive-addon.opaque.serve) are malli-free."
+   (hive-addon.opaque.codec, hive-addon.opaque.serve) are malli-free.
+
+   ## Writing a kernel that can certify :opaque
+
+   Mounting works for any IAddon. Passing hive-native's opacity audit asks two
+   more things of the vendor, both measured on a real cljw build, and neither
+   guessable from the audit's output:
+
+   1. READ RECORD FIELDS AS BARE SYMBOLS inside defrecord method bodies, not
+      through keyword accessors. A field read as `(:state this)` escapes as a
+      keyword, so the mangler must KEEP the field name; read as `state` it is
+      renamed. This is the one change that moved a real kernel's accounting
+      from :unprovable to :accounted.
+
+      Note the trap: `(:field this)` is the idiom hive-addon's own portable
+      stratum REQUIRES, because cljrs does not bind record fields in method
+      bodies. That rule is about cljrs. A vendor kernel is compiled by cljw
+      alone, which binds them, so the portable rule does not apply to it and
+      following it out of habit costs the certification.
+
+   2. NAME THINGS THE AUDITOR CAN PROBE. Below hive-native's extraction floor
+      (6 characters) a name cannot be searched for, so its absence from a
+      report is not evidence it is gone, and the audit reports :unprovable
+      rather than passing. A short name is not safer, it is unaudited.
+
+   What :opaque does NOT claim: it means nothing the tool can REMOVE survived.
+   A tuned numeric constant still reaches the constant pool and is reported at
+   :medium under :numeric-literal, a class no elision pass can strip. Code on
+   a customer's CPU is recoverable in the end; opacity is a cost imposed on an
+   attacker, never a lock."
   (:require [clojure.java.io :as io]
             [clojure.pprint :as pprint]
             [clojure.string :as str]
