@@ -19,7 +19,7 @@ something entirely unrelated — can host addons by consuming this lib.
 ## Coordinates
 
 ```clojure
-io.github.hive-agi/hive-addon {:mvn/version "0.3.2"}
+io.github.hive-agi/hive-addon {:mvn/version "1.0.0"}
 ```
 
 Deps: Clojure + [hive-dsl](https://github.com/hive-agi/hive-dsl) + [malli](https://github.com/metosin/malli). `.cljc`.
@@ -113,9 +113,38 @@ now have a new sibling to receive, and registers the new addons with hive-hot.
 ;; => InjectReport: :hot/injected, :hot/already-mounted, :hot/affected, :mounted ...
 ~~~
 
+## Companion contracts
+
+An addon that is more than tools implements one of these beside `IAddon`, on
+the same reify, so a vessel or terminal never compile-depends on a host:
+
+| Namespace              | Protocol         | For                                                        |
+|------------------------|------------------|------------------------------------------------------------|
+| `hive-addon.terminal`  | `ITerminalAddon` | an addon-contributed terminal backend (started in `initialize!`) |
+| `hive-addon.vessel`    | `IVessel`        | a headed environment (Emacs, tmux, a web UI) supplying terminals, editors, channels and REPLs |
+| `hive-addon.capability`| (data)           | the machine-readable description of one tool's commands, their arguments and their stability |
+
+`hive-addon.opaque` mounts a compiled, source-free addon: an ordinary mount
+manifest with `:addon/type :external` and `:addon/trust-class :proprietary`,
+governed by the same licence gate as any other, with nothing special-cased in
+the mount path.
+
+## Versioning
+
+From 1.0.0 this library follows [Semantic Versioning](https://semver.org).
+The public contract is `IAddon` and its companion protocols, the mount and plug
+manifest schemas, and the registry APIs.
+
+- Removing a protocol or a manifest key, or adding a required method or key, is
+  a **major** change: every addon in the fleet must be edited to stay mountable.
+- Adding an optional manifest key, an optional companion protocol, or a new
+  registry function is a **minor** change.
+- A host may add capabilities; an addon may ignore capabilities it does not
+  declare. Neither is a breaking change.
+
 ## Releasing
 
-Bump `VERSION`, merge to `main` — CI tags `v<VERSION>` and cuts a GitHub release.
+Bump `VERSION`, merge to `main`. CI tags `v<VERSION>` and cuts a GitHub release.
 
 ## License
 

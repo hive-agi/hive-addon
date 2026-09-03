@@ -170,6 +170,29 @@ if [ -f "$out/cljw-drv" ]; then
 fi
 
 echo
+echo "== portable.oracle-opaque (JVM + cljw; the tier a proprietary kernel is BUILT from) =="
+# The two namespaces a `cljw build` artifact loads. cljw is not one host among
+# three here, it is THE host: the kernel is a cljw binary, so a divergence in
+# this diff means a customer gets different answers from the binary than from
+# the source it was built from.
+#
+# It needs no malli and no hive-dsl — that is the tier's admission rule, and
+# hive-addon.mount.portable-test asserts it off the require closure — so this
+# leg runs whenever cljw does.
+run_host jvm-opq clojure -Sdeps "{:paths [\"$SRC\" \"$DSL\" \"$TEST\"]}" -M -e "(require 'portable.oracle-opaque)"
+grep -q ORACLE-OPAQUE-END "$out/jvm-opq" || { echo "FAIL jvm opaque leg did not complete"; cat "$out/jvm-opq"; exit 1; }
+[ -n "$CLJW" ] && run_host cljw-opq "$CLJW" -cp "$CP" "$here/oracle_opaque.cljc"
+
+if [ -f "$out/cljw-opq" ]; then
+  grep -q ORACLE-OPAQUE-END "$out/cljw-opq" || fail "cljw opaque leg did not complete"
+  if diff -u "$out/jvm-opq" "$out/cljw-opq" > "$out/opq.diff"; then
+    echo "OK   jvm == cljw (opaque leg, $(grep -c '|' "$out/jvm-opq") observations)"
+  else
+    fail "jvm != cljw (opaque leg)"; cat "$out/opq.diff"
+  fi
+fi
+
+echo
 echo "== portable.oracle-schema (JVM + cljw; cljrs blocked on deftype) =="
 # cljw resolves :git/url + :local/root only, so malli must be on the classpath as
 # SOURCE. Discover the cljw gitlib checkout; skip the leg (loudly) if absent —

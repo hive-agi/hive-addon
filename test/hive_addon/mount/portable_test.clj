@@ -108,6 +108,48 @@
      hive-addon.plug
      hive-addon.mount.entitlement})
 
+(def opaque-roots
+  "The OPAQUE KERNEL TIER: the namespaces a COMPILED PROPRIETARY ADDON loads.
+
+   A vendor writes an IAddon, `cljw build` turns it into one native binary, and
+   the host mounts it through hive-addon.opaque.addon. Whatever these two roots
+   reach is compiled INTO that binary, which makes this tier's rule different in
+   kind from the other two: it is not about behaving identically across hosts,
+   it is about being LOADABLE AT ALL under `cljw build`.
+
+   That is why the rule below is about the require closure rather than about
+   syntax. malli does not load on cljw, so a contract written beside
+   `codec/encode` would not fail a style check, it would fail the vendor's
+   build. The contracts therefore live in hive-addon.opaque.contracts, outside
+   this tier and host-side only, and the closure test is what keeps them there.
+
+   A JVM + cljw claim, pinned behaviourally by test/portable/oracle_opaque.cljc.
+   cljrs is absent for two independent reasons: `serve` dispatches through a
+   protocol from another namespace, which cljrs cannot do (the same limitation
+   behind oracle_driver.cljc), and cljrs is not installed here, so any claim
+   about it would be an assertion rather than a measurement.
+
+   hive-addon.opaque.codec is written to the STRICTER three-host rules and
+   satisfies all of them today (see the zero-conditional test below). It is
+   deliberately NOT in `roots`: this repo admits a namespace when the oracle has
+   MEASURED it on three runtimes, never to express an intention. The day cljrs
+   is installed, run the oracle and move it."
+  '#{hive-addon.opaque.codec
+     hive-addon.opaque.serve})
+
+(def kernel-tier-allowed-foreign
+  "Namespaces OUTSIDE this tier that a kernel-tier namespace may still require.
+
+   `clojure.*` is the host's own core, present on every runtime by definition.
+   hive-addon.protocol is the IAddon protocol itself: the kernel exists to
+   implement it, it is malli-free, and it is governed by the schema tier's
+   rules, which are stricter than nothing.
+
+   Everything else is refused, hive-dsl included. Not because hive-dsl would
+   break, but because every namespace admitted here becomes bytes in every
+   vendor's binary, and a leaf that nothing needs is a cost paid by the whole
+   marketplace."
+  '#{hive-addon.protocol})
 
 ;; =============================================================================
 ;; Reading the stratum off disk
@@ -176,6 +218,32 @@
     (into (sorted-set)
           (comp (filter idx) (remove three-host))
           (closure idx schema-roots))))
+
+(defn opaque-closure
+  "The FULL require closure of the kernel tier, in-repo namespaces only."
+  []
+  (let [idx @index]
+    (into (sorted-set) (filter idx) (closure idx opaque-roots))))
+
+(defn opaque-tier-nses
+  "Namespaces the kernel tier OWNS: its closure minus the two tiers already
+   governed. Each namespace must be governed by exactly one rule set, and
+   hive-addon.protocol is reached by the schema tier as well, so it stays there."
+  []
+  (let [three-host (portable-nses)
+        schema     (schema-tier-nses)]
+    (into (sorted-set)
+          (comp (remove three-host) (remove schema))
+          (opaque-closure))))
+
+(defn foreign-requires
+  "Every namespace the given `nses` require that is not itself among them."
+  [nses]
+  (let [idx @index
+        own (set nses)]
+    (into (sorted-set)
+          (comp (mapcat (fn [n] (get-in idx [n :requires]))) (remove own))
+          nses)))
 
 ;; =============================================================================
 ;; The three admission rules
@@ -395,6 +463,81 @@
     (is (seq (schema-tier-nses))
         "the schema tier must not be empty — an empty set would satisfy every
          rule above vacuously")))
+
+(deftest opaque-kernel-tier-requires-nothing-a-cljw-build-cannot-load
+  ;; THE admission rule for this tier, and the one that decides whether the
+  ;; marketplace works at all. Everything the kernel roots reach is compiled
+  ;; into every vendor's binary, and malli does not load under `cljw build`, so
+  ;; a require added here is not a style regression: it is a vendor whose build
+  ;; stops working, discovered by the vendor rather than by us.
+  ;;
+  ;; Stated as a WHITELIST over the require closure, not as a malli blacklist.
+  ;; A blacklist only catches the one dependency we thought of; hive-schemas,
+  ;; hive-spi and a transitive pull through hive-dsl would all pass it.
+  (let [nses    (opaque-closure)
+        foreign (foreign-requires nses)
+        illegal (remove (fn [n]
+                          (or (contains? kernel-tier-allowed-foreign n)
+                              (str/starts-with? (str n) "clojure.")))
+                        foreign)]
+    (is (seq nses) "the closure must resolve, or this test checks nothing")
+    (is (every? nses opaque-roots)
+        "every kernel root must be indexed; a typo'd root would check nothing")
+    (is (empty? illegal)
+        (str "the opaque kernel tier requires " (pr-str (vec illegal))
+             ", which is compiled into every vendor's binary. Contracts and"
+             " schemas belong in hive-addon.opaque.contracts / .schema, which"
+             " are HOST-side and outside this tier."))))
+
+(deftest opaque-kernel-tier-conditionals-are-total
+  ;; The JVM+cljw rule. `serve` cannot avoid a catch class, and a NON-total
+  ;; conditional elides on any host whose feature is unlisted, which turns the
+  ;; graceful optional-method default into a crash on the exact addon the
+  ;; default exists for.
+  (doseq [ns (opaque-tier-nses)]
+    (testing (str ns)
+      (is (empty? (non-total-reader-conditionals (get-in @index [ns :forms])))
+          (str ns " has a reader conditional with no :default branch")))))
+
+(deftest opaque-codec-is-already-three-host-clean
+  ;; hive-addon.opaque.codec is held to the STRICTER rules even though it is not
+  ;; yet a three-host claim, because that claim is one measurement away: cljrs is
+  ;; simply not installed here. Enforcing the rules now means the day it is
+  ;; installed the work is running the oracle, not repairing the namespace.
+  ;;
+  ;; This is also what pins `decode`'s deliberate refusal to catch. Catching
+  ;; needs a catch class, a catch class needs a reader conditional, and a reader
+  ;; conditional is exactly what this assertion forbids. The rescue therefore
+  ;; lives in serve and addon, which are boundaries that own one anyway.
+  (let [forms (get-in @index ['hive-addon.opaque.codec :forms])]
+    (is (some? forms) "codec must be indexed for this test to mean anything")
+    (is (zero? (reader-conditional-count forms))
+        "codec carries a reader conditional; :clj does not select the JVM")
+    (is (empty? (for-bindings forms))
+        "codec uses `for`; cljrs errors on a second binding and SILENTLY ignores :when")
+    (is (empty? (unevaluated-or-defaults forms))
+        "codec has a non-self-evaluating :or default; cljrs binds it UNEVALUATED")
+    (is (empty? (bare-record-fields forms))
+        "codec reads a defrecord field as a bare symbol; cljrs does not bind them")
+    (is (empty? (self-shadowing-params forms))
+        "codec has a defn whose parameter shares its own name")))
+
+(deftest every-namespace-is-governed-by-exactly-one-tier
+  (let [three-host (set (portable-nses))
+        schema     (set (schema-tier-nses))
+        opaque     (set (opaque-tier-nses))]
+    (is (empty? (clojure.set/intersection three-host opaque)))
+    (is (empty? (clojure.set/intersection schema opaque)))
+    (is (seq opaque)
+        "the opaque tier must not be empty; an empty set satisfies every rule
+         above vacuously")
+    (testing "and the tier owns exactly the two roots, protocol having been
+              claimed by the schema tier first"
+      ;; Not decoration: it says WHERE hive-addon.protocol is governed. Were it
+      ;; to fall out of the schema tier it would land here silently, and this
+      ;; tier's rules are the weaker of the two.
+      (is (= '#{hive-addon.opaque.codec hive-addon.opaque.serve} opaque))
+      (is (contains? schema 'hive-addon.protocol)))))
 
 (deftest totality-rule-is-discriminating
   (testing "non-total conditionals are flagged and total ones are not"
