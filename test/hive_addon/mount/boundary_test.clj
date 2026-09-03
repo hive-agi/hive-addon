@@ -4,7 +4,8 @@
    graceful degrade (failing/non-IAddon/throwing ctor + throwing initialize! are
    recorded, later specs still mount, succeeded ones are NOT torn down), dry-run
    golden-replay parity, and reverse-order teardown with the no-nuke invariant."
-  (:require [clojure.test :refer [deftest is testing use-fixtures]]
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is testing use-fixtures]]
             [hive-addon.mount.boundary :as boundary]
             [hive-addon.mount.port :as port]
             [hive-addon.mount.schema :as ms]
@@ -65,6 +66,12 @@
   "Ctor that throws."
   [_config]
   (throw (ex-info "boom in ctor" {})))
+
+(defn make-legacy-init-map
+  "Ctor shaped like a pre-IAddon init-fn: returns a registration tally, not an
+   addon. This is hive-tmux's observed shape."
+  [_config]
+  {:registered [:a :b] :total 2})
 
 (defn make-init-throws
   "Ctor returning an addon whose initialize! throws."
@@ -205,6 +212,27 @@
         (is (= [] @shutdown-log)))
       (is (contains? (:skipped report) "a-nil"))
       (is (ms/validate ms/MountReport report)))))
+
+(deftest ctor-failure-errors-name-the-cause
+  (testing "a failed mount says WHICH way it failed, and what it got instead"
+    (let [host   (port/atom-mount-host)
+          specs  [(spec "a-nil"    "make-nil-addon")
+                  (spec "b-throw"  "make-throwing-ctor")
+                  (spec "c-legacy" "make-legacy-init-map")]
+          plan   (solve/solve specs)
+          report (boundary/mount! plan host)
+          err-of (fn [id] (first (:errors (result-for report id))))]
+      (testing "returning nil is no longer conflated with throwing"
+        (is (= "constructor returned nil" (err-of "a-nil"))))
+      (testing "a throwing ctor reports the exception message, not just that it failed"
+        (is (str/includes? (err-of "b-throw") "constructor threw"))
+        (is (str/includes? (err-of "b-throw") "boom in ctor")))
+      (testing "a non-IAddon return names its class and, for a map, its keys"
+        (let [e (err-of "c-legacy")]
+          (is (str/includes? e "did not return an IAddon"))
+          (is (str/includes? e "PersistentArrayMap"))
+          (is (str/includes? e ":registered"))
+          (is (str/includes? e ":total")))))))
 
 (deftest constructor-resolution-preserves-load-failure
   (testing "absent constructor and failed namespace load remain distinct"

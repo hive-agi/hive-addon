@@ -344,13 +344,23 @@
             (if (r/err? cfg)
               (mount-result id false :config :errors [(:message cfg)])
               (let [{:keys [config retry-policy]} (:ok cfg)
-                    instance (r/rescue nil (ctor config))]
+                    built    (r/try-effect (ctor config))
+                    instance (when-not (r/err? built) (:ok built))]
                 (cond
+                  (r/err? built)
+                  (mount-result id false :failed
+                                :errors [(str "constructor threw: " (:message built))])
+
                   (nil? instance)
-                  (mount-result id false :failed :errors ["constructor returned nil or threw"])
+                  (mount-result id false :failed :errors ["constructor returned nil"])
 
                   (not (proto/addon? instance))
-                  (mount-result id false :failed :errors ["constructor did not return an IAddon"])
+                  (mount-result id false :failed
+                                :errors [(str "constructor did not return an IAddon; got "
+                                              (.getName (class instance))
+                                              (when (map? instance)
+                                                (str " with keys "
+                                                     (pr-str (vec (sort (map str (keys instance))))))))])
 
                   :else
                   (let [reg (r/try-effect (port/register! host instance))]
