@@ -3,7 +3,7 @@
 
         ;; hive-dsl — Result monad, rescue/guard DSL, error taxonomy.
         ;; Maven coord (on Clojars) so hive-addon's published pom is self-contained.
-        io.github.hive-agi/hive-dsl {:mvn/version "0.5.20"}
+        io.github.hive-agi/hive-dsl {:mvn/version "0.5.21"}
 
         ;; malli — schema layer for the IAddon contract (self-contained; no hive-spi).
         ;; The addon bounded context owns its own schemas (DDD). House pin: 0.20.1.
@@ -32,7 +32,7 @@
                        ;; mutation); hive-schemas synthesizes those facets from
                        ;; the malli schemas in hive-addon.hot.schema. Test-only:
                        ;; the published lib stays a three-dep leaf.
-                       io.github.hive-agi/hive-test {:mvn/version "0.3.17"}
+                       io.github.hive-agi/hive-test {:mvn/version "0.4.0"}
                        io.github.hive-agi/hive-schemas {:mvn/version "0.1.29"}}
          :main-opts ["-m" "cognitect.test-runner"]
          :exec-fn cognitect.test-runner.api/test}
