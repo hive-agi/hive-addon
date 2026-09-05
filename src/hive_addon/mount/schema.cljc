@@ -19,6 +19,7 @@
             [malli.error :as me]
             [malli.registry :as mr]
             [hive-addon.schema :as s]
+            [hive-addon.extension :as ext]
             [hive-dsl.result :as r]
             [hive-addon.plug.schema :as ps]))
 
@@ -44,6 +45,12 @@
    to mount (identity, constructor coordinates, deps, capabilities). Reuses
    hive-addon.schema value objects for :addon/id, :addon/type, :addon/capabilities.
 
+   :addon/extension-points is the third capability edge (hive-addon.extension):
+   :addon/capabilities is what this addon OFFERS, :addon/requires-capabilities
+   what it needs a HOST to offer, and :addon/extension-points what it accepts
+   PROVIDERS for. A provider fills a point by declaring the point's
+   :extension/capability in its own :addon/capabilities.
+
    :addon/trust-class defaults to :foss when absent; :proprietary makes the
    spec gated, and a gated spec mounts only through a licence gate.
    :addon/entitlement names the unit a gate checks the licence against.
@@ -64,6 +71,7 @@
    [:addon/capabilities {:optional true :default #{}} s/CapabilitySet]
    [:addon/dependencies {:optional true :default #{}} [:set s/AddonId]]
    [:addon/requires-capabilities {:optional true :default #{}} [:set :keyword]]
+   [:addon/extension-points {:optional true :default []} ext/ExtensionPoints]
    [:addon/init-retry {:optional true} InitRetryPolicy]
    [:addon/reload-strategy {:optional true} :keyword]
    [:addon/description {:optional true} [:maybe :string]]
@@ -150,11 +158,12 @@
    :mount/teardown-report TeardownReport})
 
 (def registry
-  "Composite malli registry: hive-addon.schema's registry (malli defaults +
-   :addon/* schemas) plus this ns's :mount/* schemas. NOT installed as the
-   global default — reach it via the wrappers below or {:registry registry}."
+  "Composite malli registry: hive-addon.extension's registry (malli defaults +
+   :addon/* + :extension/* schemas) plus this ns's :mount/* schemas. NOT
+   installed as the global default: reach it via the wrappers below or
+   {:registry registry}."
   (mr/composite-registry
-   s/registry
+   ext/registry
    (mr/registry mount-schemas)))
 
 (defn schema

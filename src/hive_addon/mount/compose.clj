@@ -10,6 +10,7 @@
   (:require [hive-addon.plug :as plug]
             [hive-addon.plug.schema :as plug-schema]
             [hive-addon.mount.solve :as solve]
+            [hive-addon.extension :as ext]
             [hive-addon.mount.boundary :as boundary]
             [hive-addon.mount.port :as port]
             [hive-dsl.result :as r]
@@ -121,9 +122,15 @@
   "Pure composition (no mount effects): select discovered specs through the plug
    layers, then solve the mount order. Returns
    (r/ok {:selected-ids #{addon-id} :dropped {addon-id reason} :unjoinable [lib]
-          :selected-absent #{addon-id} :config-by-id {addon-id config} :plan MountPlan})
+          :selected-absent #{addon-id} :config-by-id {addon-id config}
+          :plan MountPlan :extensions ExtensionReport})
    or the (r/err ...) from plug resolution / a fail-closed solve. When no layer
-   carries :iaddon/plugs every discovered spec is kept (back-compat)."
+   carries :iaddon/plugs every discovered spec is kept (back-compat).
+
+   :extensions is hive-addon.extension/report over the SELECTED specs: which
+   addon opens each extension point, who fills it, and the two diagnostics that
+   name a seam nothing reaches (:vacant, :unconsumed) plus a :cardinality/one
+   point with rival tenants (:over-subscribed). Reported, never enforced."
   ([discovered-specs layers] (compose-plan discovered-specs layers {}))
   ([discovered-specs layers {:keys [profile strict-select] :as opts}]
    (if-not (layers-with-plugs? layers)
@@ -135,7 +142,8 @@
                 :unjoinable      []
                 :selected-absent #{}
                 :config-by-id    {}
-                :plan            plan})))
+                :plan            plan
+                :extensions      (ext/report discovered-specs)})))
      (r/let-ok [presolved (plug/resolve-config layers {:profile profile})]
        (let [idx (plug-index presolved)
              {:keys [specs dropped unjoinable selected-absent config-by-id]}
@@ -148,7 +156,8 @@
                   :unjoinable      unjoinable
                   :selected-absent selected-absent
                   :config-by-id    config-by-id
-                  :plan            plan})))))))
+                  :plan            plan
+                  :extensions      (ext/report specs)})))))))
 
 (defn compose!
   "Full composition: compose-plan then mount! the plan into host, threading
