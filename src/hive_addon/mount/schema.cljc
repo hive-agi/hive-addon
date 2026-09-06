@@ -55,6 +55,13 @@
    spec gated, and a gated spec mounts only through a licence gate.
    :addon/entitlement names the unit a gate checks the licence against.
 
+   :addon/maturity is the how-finished claim every downstream surface renders
+   from: the store badge, `hive addon status`, and any host policy that
+   declines to mount unfinished work. It defaults to :experimental, NOT
+   :stable, so a manifest that never made the claim must not be read as having
+   made the strongest one. It is deliberately not spelled :addon/status, which
+   hive-store already owns for whether the coordinate resolves today.
+
    :addon/reload-strategy names the hot-reload strategy this addon requires
    (hive-addon.hot.strategy). Absent means the default chain selects one. It is
    an open :keyword, never an enum — the strategy set is extensible by any
@@ -66,6 +73,7 @@
    [:addon/init-ns [:string {:min 1}]]
    [:addon/init-fn [:string {:min 1}]]
    [:addon/kind {:optional true} [:enum :addon :library]]
+   [:addon/maturity {:optional true :default :experimental} s/Maturity]
    [:addon/version {:optional true} [:string {:min 1}]]
    [:addon/config {:optional true :default {}} [:map-of :keyword :any]]
    [:addon/capabilities {:optional true :default #{}} s/CapabilitySet]

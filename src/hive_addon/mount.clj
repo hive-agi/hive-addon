@@ -15,7 +15,8 @@
             [hive-addon.mount.port :as port]
             [hive-addon.mount.schema :as schema]
             [hive-addon.mount.solve :as solve]
-            [hive-addon.mount.entitlement :as ent]))
+            [hive-addon.mount.entitlement :as ent]
+            [hive-addon.mount.maturity :as mat]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -137,6 +138,22 @@
 (def gated?
   "hive-addon.mount.entitlement/gated? — does this spec require a licence gate."
   ent/gated?)
+
+(def addon-maturity
+  "hive-addon.mount.maturity/maturity: this spec's maturity claim, defaulted."
+  mat/maturity)
+
+(def maturity-at-least?
+  "hive-addon.mount.maturity/at-least?: (floor spec) maturity comparison."
+  mat/at-least?)
+
+(def maturity-declared?
+  "hive-addon.mount.maturity/declared?: did the manifest state a maturity."
+  mat/declared?)
+
+(def dormant?
+  "hive-addon.mount.maturity/dormant?: is this spec out of development."
+  mat/dormant?)
 
 (def read-layers
   "hive-addon.mount.compose/read-layers — paths -> validated plug layers."

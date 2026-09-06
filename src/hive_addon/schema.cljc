@@ -21,7 +21,8 @@
             [malli.error :as me]
             [malli.registry :as mr]
             [hive-addon.protocol :as proto]
-            [hive-dsl.result :as r]))
+            [hive-dsl.result :as r]
+            [hive-dsl.adt :as adt]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -39,6 +40,39 @@
   "The addon's execution type. Derived from proto/valid-addon-types so the
    enum can never drift from the protocol's own constant."
   (into [:enum] proto/valid-addon-types))
+
+(adt/defadt AddonMaturity
+  "Where an addon sits on the road to maturity, as a CLOSED sum type.
+
+   Closed because every value is rendered somewhere (store badge, mount
+   policy, `hive addon status`), so gaining one is a product decision, not an
+   extension point. Cardinality decides the construct: an open set would be a
+   multimethod, this is an ADT.
+
+   :stable       released, supported, safe to depend on
+   :beta         active development toward maturity; the surface may still move
+   :experimental proving a capability; may change shape or vanish
+   :dormant      not under development and not recommended; kept for archaeology"
+  :dormant
+  :experimental
+  :beta
+  :stable)
+
+(def Maturity
+  "The `:addon/maturity` manifest field: a BARE variant keyword, because a
+   manifest author writes `:addon/maturity :beta` and not an ADT value map.
+
+   Derived from AddonMaturity's variant set, so the wire enum cannot drift
+   from the type, exactly as AddonType derives from proto/valid-addon-types.
+
+   NOT `:addon/status`. hive-store already owns that key for a different
+   claim: whether a customer's token resolves the coordinate today
+   (:available / :preview). Maturity is about how finished the code is, and
+   the two answers disagree often enough that sharing a key would be a bug.
+
+   Absence defaults to :experimental at the MountSpec, never to :stable: an
+   undeclared addon must not inherit a claim it never made."
+  (into [:enum] (sort (:variants AddonMaturity))))
 
 (def Capability
   "A single capability keyword. OPEN: the standard set plus custom addon
@@ -123,6 +157,7 @@
    can reference addon shapes by keyword (:addon/health, :addon/tools, ...)."
   {:addon/id                AddonId
    :addon/type              AddonType
+   :addon/maturity          Maturity
    :addon/capability        Capability
    :addon/capabilities      CapabilitySet
    :addon/health-status     HealthStatus
