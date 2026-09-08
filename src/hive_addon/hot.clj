@@ -29,7 +29,8 @@
    dispatch misses with an error that reads as if the method were never
    implemented. `no-reload` is that rule as data; feed it to hive-hot's
    :no-reload and the hazard cannot be tripped."
-  (:require [hive-addon.hot.cascade :as cascade]
+  (:require [hive-addon.diagnostic :as diagnostic]
+            [hive-addon.hot.cascade :as cascade]
             [hive-addon.hot.mount-driver :as driver]
             [hive-addon.hot.source :as source]
             [hive-addon.hot.strategy :as strategy]
@@ -176,6 +177,7 @@
    :teardown/data-preserved? true
    :mounted []
    :ok? false
+   :diagnostic (diagnostic/missing-addon addon-id)
    :errors [(str "no mounted spec with :addon/id " (pr-str addon-id))]})
 
 (defn- merge-reports
@@ -196,6 +198,7 @@
      :teardown/data-preserved? true
      :mounted (into [] (mapcat :mounted) reports)
      :ok? (every? :ok? reports)
+     :diagnostics (into [] (keep :diagnostic) reports)
      :errors (into [] (mapcat #(or (:errors %) [])) reports)}))
 
 ;; =============================================================================

@@ -7,11 +7,12 @@
 
         ;; malli — schema layer for the IAddon contract (self-contained; no hive-spi).
         ;; The addon bounded context owns its own schemas (DDD). House pin: 0.20.1.
-        metosin/malli {:mvn/version "0.20.1"}}
+        metosin/malli {:mvn/version "0.20.1"}
+        io.github.hive-agi/hive-help {:mvn/version "0.1.4"}}
 
  ;; hive-hot is deliberately NOT in :deps. hive-addon.hot resolves it through the
  ;; var at call time and degrades to :hot/available? false when it is absent, so
- ;; the published lib stays a three-dep leaf and consumers that want file-watching
+ ;; the published lib stays a leaf library and consumers that want file-watching
  ;; add hive-hot themselves. It appears below only so dev + the suite can exercise
  ;; the wired path alongside the graceful-degradation one.
  :aliases
@@ -31,7 +32,7 @@
                        ;; hive-test supplies the trifecta (golden + property +
                        ;; mutation); hive-schemas synthesizes those facets from
                        ;; the malli schemas in hive-addon.hot.schema. Test-only:
-                       ;; the published lib stays a three-dep leaf.
+                       ;; the published lib stays a leaf library.
                        io.github.hive-agi/hive-test {:mvn/version "0.4.0"}
                        io.github.hive-agi/hive-schemas {:mvn/version "0.1.29"}}
          :main-opts ["-m" "cognitect.test-runner"]

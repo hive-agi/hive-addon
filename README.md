@@ -1,5 +1,12 @@
 # hive-addon
 
+Failed mount results and reload requests for absent addons include a
+`:diagnostic` map rendered through hive-help: `:code`, `:message`, `:retryable`,
+and `:actions`. Existing phase, error, and preservation fields remain intact.
+Mount guidance follows the reported phase. Missing-addon guidance distinguishes
+initial injection from reloading and points operators to startup dependency
+wiring. Guidance never grants an entitlement or performs recovery automatically.
+
 <!-- hive-badges -->
 
 [![Clojars Project](https://img.shields.io/clojars/v/io.github.hive-agi/hive-addon.svg)](https://clojars.org/io.github.hive-agi/hive-addon)

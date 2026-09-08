@@ -12,7 +12,8 @@
    MountReport and the loop CONTINUES; already-mounted addons are NEVER torn down
    on a mid-DAG failure. teardown! shuts down in reverse mount order and always
    reports :teardown/data-preserved? true (shutdown! never deletes data)."
-  (:require [clojure.edn :as edn]
+  (:require [hive-addon.diagnostic :as diagnostic]
+            [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
             [hive-addon.mount.port :as port]
@@ -185,11 +186,12 @@
 (defn- mount-result
   [id success? phase & {:keys [errors already-initialized? init-attempts
                                constructor-resolution]}]
-  (cond-> {:addon/id id :success? success? :phase phase}
+  (diagnostic/mount-outcome
+    (cond-> {:addon/id id :success? success? :phase phase}
     (seq errors)                (assoc :errors (vec errors))
     (some? already-initialized?) (assoc :already-initialized? already-initialized?)
     (some? init-attempts)        (assoc :init-attempts init-attempts)
-    (map? constructor-resolution) (merge (dissoc constructor-resolution :constructor))))
+    (map? constructor-resolution) (merge (dissoc constructor-resolution :constructor)))))
 
 (def default-init-retry
   "Default bounded initializer retry policy. :max-attempts counts the first call."

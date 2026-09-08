@@ -106,6 +106,7 @@
         {:ok? false :loaded [] :errors [(str "namespace reload failed: " (:message res))]}
         (let [{:keys [loaded failed skipped dragged multi-file] :as out} (:ok res)]
           (cond-> {:ok? (nil? failed) :loaded (vec loaded)}
+            (:diagnostic out) (assoc :diagnostic (:diagnostic out))
             failed (assoc :errors [(str "namespace reload failed at: " failed
                                         (when-let [e (:error out)] (str " — " e)))])
             (seq skipped)    (assoc :skipped (mapv str skipped))
@@ -149,6 +150,7 @@
   "Fold what the namespace reloader answered beyond :loaded into a report."
   [report ns-res]
   (cond-> report
+    (:diagnostic ns-res) (assoc :diagnostic (:diagnostic ns-res))
     (seq (:skipped ns-res))        (assoc :hot/ns-skipped (vec (:skipped ns-res)))
     (seq (:dragged ns-res))        (assoc :hot/ns-dragged (vec (:dragged ns-res)))
     (seq (:multi-file ns-res))     (assoc :hot/multi-file (:multi-file ns-res))
