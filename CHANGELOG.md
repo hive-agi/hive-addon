@@ -18,6 +18,28 @@ optional manifest key, an optional companion protocol, or a registry function
 is minor. A host adding capabilities, or an addon ignoring capabilities it does
 not declare, is neither.
 
+## [Unreleased]
+
+### Added
+
+- Every opaque-kernel request is bounded by a deadline. Two optional keys on
+  the spec carried as `:addon/config` set them: `:opaque/init-timeout-ms` for
+  the first request after each kernel start (default 60000, since a cold
+  kernel pays its startup there) and `:opaque/request-timeout-ms` for every
+  later one (default 30000). Both are optional, so an addon that declares
+  neither keeps working unchanged.
+
+  A kernel that misses a deadline is STOPPED rather than reused: a subprocess
+  that has already failed to answer once has no readable position in the line
+  protocol, and a later reply would be read as the answer to a different
+  request. Calls against a stopped kernel fail with an error naming the
+  deadline it missed, `health` reports `:down` with that reason, and the next
+  `initialize!` starts a fresh kernel.
+
+  The stop kills the whole process TREE, not just the direct child: a kernel
+  launched through a wrapper leaves the real worker running otherwise, and it
+  keeps holding the pipe.
+
 ## [1.0.0]
 
 The contract stopped moving. Nothing in it changed for this release. 1.0.0 is

@@ -34,7 +34,9 @@
    Never throws. A dead pipe, an unreadable answer and a kernel-side error all
    come back as an :error response, because every caller here is an IAddon
    method and the IAddon contract has no exception channel: `health` must
-   answer, `tools` must return a seq, a tool handler must return a result map."
+   answer, `tools` must return a seq, a tool handler must return a result map.
+   A transport that throws (a missed deadline, a kernel stopped after one)
+   answers {:op op :error <its message>}, so the error names the cause."
   [transport op args]
   (let [answer (try
                  (some->> (codec/request op args)
@@ -105,6 +107,10 @@
         #{}))
 
   (initialize! [this config]
+    ;; -start! may have started a NEW process (the first mount, or a restart
+    ;; after a missed deadline or an exit), and a new process describes itself
+    ;; afresh.
+    (reset! (:describe-cache this) nil)
     (let [start (try (t/-start! (:transport this)) nil
                      (catch #?(:clj Throwable :default :default) t
                        (or (ex-message t) (str t))))]
@@ -162,7 +168,10 @@
     (let [alive? (try (t/-alive? (:transport this))
                       (catch #?(:clj Throwable :default :default) _ false))]
       (if-not alive?
-        (codec/health-report false {:opaque/id (:opaque/id (:spec this))})
+        (let [reason (try (t/down-reason (:transport this))
+                          (catch #?(:clj Throwable :default :default) _ nil))]
+          (codec/health-report false (cond-> {:opaque/id (:opaque/id (:spec this))}
+                                       (some? reason) (assoc :last-error reason))))
         ;; Ask the kernel rather than reporting on the pipe. A live process whose
         ;; own health is :degraded must not be reported :ok just because its
         ;; stdin is open, and a process that has stopped answering is :down

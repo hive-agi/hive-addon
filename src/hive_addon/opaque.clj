@@ -80,11 +80,21 @@
   [spec]
   (into [(:opaque/exec spec)] (or (:opaque/args spec) [])))
 
-(defn subprocess-addon
-  "The proxy for a kernel BINARY: an OpaqueAddon over a subprocess transport.
-   This is what a marketplace artifact mounts through."
+(defn deadlines
+  "The subprocess transport's deadline opts for one OpaqueSpec:
+   :opaque/request-timeout-ms and :opaque/init-timeout-ms, each nil when the
+   spec leaves it to the transport's default."
   [spec]
-  (addon/opaque-addon spec (subprocess/subprocess-transport (build-argv spec))))
+  {:request-timeout-ms (:opaque/request-timeout-ms spec)
+   :init-timeout-ms    (:opaque/init-timeout-ms spec)})
+
+(defn subprocess-addon
+  "The proxy for a kernel BINARY: an OpaqueAddon over a subprocess transport,
+   every request bounded by the spec's deadlines (see `deadlines`). This is
+   what a marketplace artifact mounts through."
+  [spec]
+  (addon/opaque-addon spec (subprocess/subprocess-transport (build-argv spec)
+                                                            (deadlines spec))))
 
 (defn serving-transport
   "An in-process ITransport that serves a LIVE IAddon through the real wire.

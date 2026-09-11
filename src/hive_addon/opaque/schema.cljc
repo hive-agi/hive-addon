@@ -9,7 +9,8 @@
    `schema`/`validate`/`explain`/`validate*` or by passing {:registry registry}.
 
    Opaque shapes are registered under :opaque/* keys (:opaque/wire,
-   :opaque/request, :opaque/response, :opaque/describe, :opaque/spec).
+   :opaque/request, :opaque/response, :opaque/describe, :opaque/timeout-ms,
+   :opaque/spec).
 
    The kernel side never loads this namespace: hive-addon.opaque.codec and
    hive-addon.opaque.serve are malli-free so a cljw-built binary carries no
@@ -103,17 +104,29 @@
 ;; What the host needs to reach the kernel
 ;; =============================================================================
 
+(def TimeoutMs
+  "A deadline in milliseconds: a positive integer."
+  [:int {:min 1}])
+
 (def OpaqueSpec
   "Everything the proxy needs to reach one opaque kernel: the executable and its
    argv. :opaque/id is the addon id the manifest promised; when present the
    kernel's own describe must agree. :opaque/capabilities is what the manifest
    advertises before the kernel is running. Rides as :addon/config of the mount
-   manifest."
+   manifest.
+
+   :opaque/request-timeout-ms bounds each request to a kernel that has answered
+   once (default 30000); :opaque/init-timeout-ms bounds the first request after
+   each kernel start, which is :addon/initialize! and also pays the process
+   start (default 60000). A missed deadline stops the kernel until the next
+   initialize!."
   [:map {:closed false}
    [:opaque/exec [:string {:min 1}]]
    [:opaque/args {:optional true} [:vector :string]]
    [:opaque/id {:optional true} s/AddonId]
-   [:opaque/capabilities {:optional true} s/CapabilitySet]])
+   [:opaque/capabilities {:optional true} s/CapabilitySet]
+   [:opaque/request-timeout-ms {:optional true} TimeoutMs]
+   [:opaque/init-timeout-ms {:optional true} TimeoutMs]])
 
 ;; =============================================================================
 ;; Local composite registry — hive-addon.schema registry + :opaque/* schemas
@@ -128,6 +141,7 @@
    :opaque/tool-summary ToolSummary
    :opaque/hook-summary HookSummary
    :opaque/describe     Describe
+   :opaque/timeout-ms   TimeoutMs
    :opaque/spec         OpaqueSpec})
 
 (def registry
