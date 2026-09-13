@@ -94,7 +94,9 @@
 (defmulti live-commands
   "Commands that make an already-running client load the runtime installed at
    DIR (which then runs its own loader). A running client may hold an older
-   version of the same runtime, so its autoload scripts are sourced as well."
+   version of the same runtime: its autoload scripts are sourced as well when
+   the client can replace them, and the client is told to restart when it
+   cannot (a Vim that loaded them from another directory)."
   (fn [profile _dir] (:profile/loader profile)))
 
 (defn vim-string
@@ -135,10 +137,28 @@
 
 (defmethod live-commands :vimscript
   [_profile dir]
-  [(str "execute 'set runtimepath+=' . fnameescape(" (vim-string dir) ")")
-   (str "call map(sort(glob(" (vim-string (str dir "/autoload/**/*.vim")) ", 0, 1))"
-        " + sort(glob(" (vim-string (str dir "/plugin/**/*.vim")) ", 0, 1)),"
-        " {_, f -> execute('source ' . fnameescape(f))})")])
+  (let [d (vim-string dir)
+        autoload (vim-string (str dir "/autoload/**/*.vim"))
+        plugin (vim-string (str dir "/plugin/**/*.vim"))]
+    [(str "execute 'set runtimepath+=' . fnameescape(" d ")")
+     ;; Autoload scripts of this runtime that the running Vim already loaded
+     ;; from ANOTHER directory. Vim keeps the first definition of an autoload
+     ;; function and refuses the second (E1073), so re-sourcing would leave the
+     ;; old script in place while its siblings load new and call it with new
+     ;; signatures (E118). Measured 2026-09-13 on hive-vessel's wire.vim/ops.vim.
+     (str "let g:hive_runtime_stale = exists('*getscriptinfo')"
+          " ? filter(map(getscriptinfo(), 'v:val.name'),"
+          " {_, n -> strpart(n, 0, len(" d ")) !=# " d
+          " && !empty(filter(map(glob(" autoload ", 0, 1), {_, f -> strpart(f, len(" d "))}),"
+          " {_, t -> strpart(n, len(n) - len(t)) ==# t}))})"
+          " : []")
+     (str "if empty(g:hive_runtime_stale)"
+          " | call map(sort(glob(" autoload ", 0, 1)) + sort(glob(" plugin ", 0, 1)),"
+          " {_, f -> execute('source ' . fnameescape(f))})"
+          " | else | echohl WarningMsg"
+          " | echomsg 'hive runtime: ' . g:hive_runtime_stale[0]"
+          " . ' is already loaded from another directory; restart Vim to use ' . " d
+          " | echohl None | endif")]))
 
 ;; =============================================================================
 ;; Plans

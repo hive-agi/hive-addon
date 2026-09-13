@@ -124,11 +124,16 @@
     (is (str/includes? src "if v:vim_did_enter"))
     (is (str/includes? src "autocmd VimEnter * ++once call s:activate()")))
   (testing "live activation extends runtimepath, then sources autoload before plugins"
-    (let [[rtp source] (:commands (first (rp/live-plan (:vim rp/default-profiles) "/r/it's")))]
+    (let [[rtp stale source] (:commands (first (rp/live-plan (:vim rp/default-profiles) "/r/it's")))]
       (is (str/includes? rtp "fnameescape('/r/it''s')"))
+      (is (str/starts-with? stale "let g:hive_runtime_stale = exists('*getscriptinfo')")
+          "a Vim without getscriptinfo() sources as before")
+      (is (str/starts-with? source "if empty(g:hive_runtime_stale) | call map(")
+          "nothing is sourced over an autoload script loaded from elsewhere")
       (is (< (str/index-of source "'/r/it''s/autoload/**/*.vim'")
              (str/index-of source "'/r/it''s/plugin/**/*.vim'")))
-      (is (str/includes? source "execute('source ' . fnameescape(f))")))))
+      (is (str/includes? source "execute('source ' . fnameescape(f))"))
+      (is (str/includes? source "restart Vim to use ' . '/r/it''s'")))))
 
 ;; =============================================================================
 ;; Interpreter
@@ -321,7 +326,28 @@
                                    (str/join ", " (map rp/vim-string live)) "])})")]
               (run-vim! home ["-u" "NONE" "-c" after-enter])
               (is (= ["1" "1"] (marker-lines live-marker))
-                  "sourcing the installed plugins in a running Vim ran the loader immediately"))))
+                  "sourcing the installed plugins in a running Vim ran the loader immediately")))
+          (testing "a Vim holding the runtime's autoload script from another directory is told to restart"
+            ;; Vim keeps the first definition of an autoload function (E1073 on
+            ;; the second), so sourcing over it would mix old and new scripts.
+            (let [stale-marker (io/file root "stale.txt")
+                  old-dir (io/file root "old-src")
+                  install-dir (rp/install-dir (:vim rp/default-profiles) "demo" home)
+                  live (:commands (first (rp/live-plan (:vim rp/default-profiles) install-dir)))
+                  after-enter (str "call timer_start(50, {-> execute(["
+                                   (str/join ", " (map rp/vim-string
+                                                       (conj live (str "call writefile([string(g:hive_runtime_stale), string(exists('g:demo_plugin_loaded'))], "
+                                                                       (rp/vim-string (str stale-marker)) ")"))))
+                                   "])})")]
+              (io/make-parents (io/file old-dir "autoload" "demo" "deep.vim"))
+              (spit (io/file old-dir "autoload" "demo" "deep.vim") "\" an older copy\n")
+              (run-vim! home ["-u" "NONE"
+                              "-c" (str "source " (io/file old-dir "autoload" "demo" "deep.vim"))
+                              "-c" after-enter])
+              (let [[stale loaded] (marker-lines stale-marker)]
+                (is (= (str "['" old-dir "/autoload/demo/deep.vim']") stale)
+                    "the loaded copy is named")
+                (is (= "0" loaded) "and nothing of the new install was sourced over it")))))
         (finally
           (reset! test-hooks {})
           (delete-tree! root))))))
