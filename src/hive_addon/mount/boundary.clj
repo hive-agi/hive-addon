@@ -317,13 +317,33 @@
   (let [held (r/rescue nil (port/registered host id))]
     (or (nil? held) (identical? held instance))))
 
+(defn- provision-runtime!
+  "Run PROVISION for an initialized addon. Returns its ProvisionReport, nil when
+   the addon has no runtime, or a failed report when PROVISION threw."
+  [provision spec instance on-event]
+  (let [id     (:addon/id spec)
+        effect (r/try-effect (provision spec instance))
+        report (if (r/err? effect)
+                 {:addon/id id :ok? false :runtimes [] :error (:message effect)}
+                 (:ok effect))]
+    (when report
+      (emit! on-event {:event (if (:ok? report) :mount/runtime-provisioned :mount/runtime-failed)
+                       :level (if (:ok? report) :info :warn)
+                       :addon/id id
+                       :runtimes (mapv (juxt :runtime/id :ok?) (:runtimes report))})
+      report)))
+
 (defn- mount-one
   "Attempt to mount a single spec into host. Returns a MountResult. Never
    throws — every failure is folded into the result (graceful degrade).
 
    The licence gate runs FIRST: a refused spec never has its constructor
-   namespace loaded, so unlicensed code is not merely unused but unread."
-  [spec host all-specs resolve-config init-retry on-event sleep-fn gate]
+   namespace loaded, so unlicensed code is not merely unused but unread.
+
+   When PROVISION is given and the addon initialized, (provision spec
+   instance) runs and its report is attached as :runtime. Provisioning is
+   auxiliary: its failure is reported, never turned into a mount failure."
+  [spec host all-specs resolve-config init-retry on-event sleep-fn gate provision]
   (let [id (:addon/id spec)]
     (if-let [reason (ent/permit gate spec)]
       (do
@@ -382,11 +402,15 @@
                                                     "the stale one stays live.")]))
 
                       :else
-                      (let [ir (retry-init! host id config retry-policy on-event sleep-fn)]
-                        (mount-result id (boolean (:success? ir)) :initialized
-                                      :errors (:errors ir)
-                                      :already-initialized? (:already-initialized? ir)
-                                      :init-attempts (:init-attempts ir))))))))))))))
+                      (let [ir     (retry-init! host id config retry-policy on-event sleep-fn)
+                            result (mount-result id (boolean (:success? ir)) :initialized
+                                                 :errors (:errors ir)
+                                                 :already-initialized? (:already-initialized? ir)
+                                                 :init-attempts (:init-attempts ir))]
+                        (if-let [runtime (when (and provision (:success? ir))
+                                           (provision-runtime! provision spec instance on-event))]
+                          (assoc result :runtime runtime)
+                          result)))))))))))))
 
 (defn mount!
   "Mount every spec in (plan :ordered) into host, in order. Returns a MountReport.
@@ -403,6 +427,9 @@
                          (default: the installed gate)
           :peer-specs    the spec set used to resolve each spec's dependencies
                          for sibling injection (default: the plan's own :ordered)
+          :provision     (fn [spec instance] -> ProvisionReport | nil), run after
+                         an addon initializes; its report lands on the result as
+                         :runtime (see hive-addon.runtime.boundary/provisioner)
           :on-event      (fn [event-map])
           :sleep-fn      (fn [milliseconds])}.
 
@@ -412,7 +439,7 @@
    silently drop those siblings from :mount/dependencies, handing the remounted
    addon a thinner config than its original mount got."
   ([plan host] (mount! plan host {}))
-  ([plan host {:keys [resolve-config init-retry on-event sleep-fn license-gate peer-specs]
+  ([plan host {:keys [resolve-config init-retry on-event sleep-fn license-gate peer-specs provision]
                :or {resolve-config port/resolve-config-default
                     init-retry {}
                     on-event (constantly nil)
@@ -421,7 +448,7 @@
          ordered (:ordered plan)
          peers   (or (seq peer-specs) ordered)
          results (mapv #(mount-one % host peers resolve-config
-                                   init-retry on-event sleep-fn gate)
+                                   init-retry on-event sleep-fn gate provision)
                        ordered)]
      {:mounted results
       :order   (mapv :addon/id ordered)
@@ -469,15 +496,31 @@
   "Shut down addon-ids in REVERSE order via (port/shutdown! host id). Returns a
    TeardownReport. :teardown/data-preserved? is always true (shutdown! never
    deletes data); a shutdown that throws is recorded in :errors but the flag
-   stays true — we did not delete."
-  [host addon-ids]
-  (let [order  (vec (reverse addon-ids))
-        errors (into []
-                     (keep (fn [id]
-                             (let [res (r/try-effect (port/shutdown! host id))]
-                               (when (r/err? res)
-                                 (str id ": " (:message res))))))
-                     order)]
-    (cond-> {:torn-down order
-             :teardown/data-preserved? true}
-      (seq errors) (assoc :errors errors))))
+   stays true — we did not delete.
+
+   opts: {:deprovision (fn [addon-id] -> ProvisionReport | nil)}, run after each
+   addon shuts down to remove the client runtime a provisioner installed for
+   it. Reports that ran land under :runtime keyed by addon id. Generated
+   runtime files are not addon data, so the no-nuke flag is unaffected."
+  ([host addon-ids] (teardown! host addon-ids {}))
+  ([host addon-ids {:keys [deprovision]}]
+   (let [order    (vec (reverse addon-ids))
+         errors   (into []
+                        (keep (fn [id]
+                                (let [res (r/try-effect (port/shutdown! host id))]
+                                  (when (r/err? res)
+                                    (str id ": " (:message res))))))
+                        order)
+         runtimes (when deprovision
+                    (into {}
+                          (keep (fn [id]
+                                  (let [res (r/try-effect (deprovision id))]
+                                    (cond
+                                      (r/err? res) [id {:addon/id id :ok? false :runtimes []
+                                                        :error (:message res)}]
+                                      (:ok res)    [id (:ok res)]))))
+                          order))]
+     (cond-> {:torn-down order
+              :teardown/data-preserved? true}
+       (seq errors)   (assoc :errors errors)
+       (seq runtimes) (assoc :runtime runtimes)))))

@@ -72,6 +72,10 @@
    contributed commands a dormant addon is advertised by. The lifecycle ignores
    a malformed key in either (the host defaults apply, and a lazy addon with no
    usable surface mounts eagerly) rather than refusing the mount.
+   :addon/runtime lists the client runtimes the addon ships (editor-side code a
+   host provisions after the addon initializes). Each entry is a
+   hive-addon.runtime.schema/RuntimeDecl, validated when provisioned, so a
+   malformed entry is a failed runtime, never a refused mount.
    Open."
   [:map {:closed false}
    [:addon/id s/AddonId]
@@ -90,6 +94,7 @@
    [:addon/reload-strategy {:optional true} :keyword]
    [:addon/lifecycle {:optional true} [:map-of :keyword :any]]
    [:addon/surface {:optional true} [:map-of :keyword :any]]
+   [:addon/runtime {:optional true} [:vector {:max 4} [:map {:closed false}]]]
    [:addon/description {:optional true} [:maybe :string]]
    [:addon/author {:optional true} [:maybe :string]]
    [:addon/license {:optional true} [:maybe :string]]
