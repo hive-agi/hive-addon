@@ -136,6 +136,13 @@ manifest with `:addon/type :external` and `:addon/trust-class :proprietary`,
 governed by the same licence gate as any other, with nothing special-cased in
 the mount path.
 
+Every request to the kernel is bounded by a deadline taken from the spec that
+rides as `:addon/config`: `:opaque/init-timeout-ms` for the first request after
+each kernel start (default 60000) and `:opaque/request-timeout-ms` for every
+later one (default 30000). A kernel that misses one is stopped, its calls fail
+with an error naming the deadline, its health reports `:down` with that reason,
+and the next `initialize!` restarts it.
+
 ## Versioning
 
 From 1.0.0 this library follows [Semantic Versioning](https://semver.org).

@@ -40,3 +40,18 @@
   (-stop! [this]
     "Stop the transport, release its resources, and return nil. MUST be
      idempotent: shutdown! is idempotent per the IAddon contract."))
+
+(defprotocol IDiagnosable
+  "OPTIONAL companion to ITransport: why a transport that is not alive stopped.
+   A transport that does not implement it is read as having no reason to give."
+
+  (-down-reason [this]
+    "A human-readable reason this transport is not alive, or nil when it is
+     alive, was never started, or was stopped on request. MUST NOT throw: it
+     is read from a health check."))
+
+(defn down-reason
+  "The transport's -down-reason when it implements IDiagnosable, else nil."
+  [transport]
+  (when (satisfies? IDiagnosable transport)
+    (-down-reason transport)))

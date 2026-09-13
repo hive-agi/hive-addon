@@ -97,6 +97,12 @@
 
 (m/=> opaque/build-argv [:=> [:cat os/OpaqueSpec] [:vector :string]])
 
+(m/=> opaque/deadlines
+      [:=> [:cat os/OpaqueSpec]
+       [:map {:closed true}
+        [:request-timeout-ms [:maybe os/TimeoutMs]]
+        [:init-timeout-ms [:maybe os/TimeoutMs]]]])
+
 ;; The manifest an opaque addon mounts through is an ORDINARY MountSpec. This
 ;; contract is where that claim is discharged: if the opaque seam ever needed a
 ;; manifest shape of its own, this line would stop validating.
