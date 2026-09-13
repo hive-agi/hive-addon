@@ -34,6 +34,7 @@
             [hive-addon.hot.mount-driver :as driver]
             [hive-addon.hot.source :as source]
             [hive-addon.hot.strategy :as strategy]
+            [hive-addon.lifecycle.oracle :as oracle]
             [hive-dsl.result :as r]
             [hive-addon.wire :as wire]))
 
@@ -181,6 +182,20 @@
    :diagnostic (diagnostic/missing-addon addon-id)
    :errors [(str "no mounted spec with :addon/id " (pr-str addon-id))]})
 
+(defn- dormant-report
+  "Every seed is dormant: nothing is mounted to reload, and the next activation
+   mounts whatever code is current then."
+  [ids opts]
+  {:hot/trigger (or (:trigger opts) :manual)
+   :hot/strategy :hot/none
+   :hot/seeds #{}
+   :hot/affected []
+   :hot/torn-down []
+   :hot/dormant (vec ids)
+   :teardown/data-preserved? true
+   :mounted []
+   :ok? true})
+
 (defn- merge-reports
   "Fold per-strategy reports into one. Used when a single trigger seeds addons
    that resolve to different strategies — each group runs its own strategy and
@@ -215,11 +230,21 @@
 
    Returns a RemountReport."
   [host specs seed-ids & [opts]]
-  (let [opts   (or opts {})
-        by-id  (into {} (map (juxt :addon/id identity)) specs)
-        seeds  (into #{} (filter by-id) seed-ids)]
-    (if (empty? seeds)
+  (let [opts     (or opts {})
+        dormant? (or (:dormant? opts) oracle/dormant?)
+        asleep   (into #{} (comp (map :addon/id) (filter dormant?)) specs)
+        specs    (into [] (remove #(contains? asleep (:addon/id %))) specs)
+        by-id    (into {} (map (juxt :addon/id identity)) specs)
+        seeds    (into #{} (filter by-id) seed-ids)
+        slept    (into [] (comp (filter asleep) (distinct)) seed-ids)]
+    (cond
+      (and (empty? seeds) (seq slept))
+      (dormant-report slept opts)
+
+      (empty? seeds)
       (not-found-report seed-ids opts)
+
+      :else
       (let [chain (or (:strategies opts) (strategy/installed-strategies))
             ;; Group by the strategy each seed selects, under its own context.
             grouped (group-by
@@ -235,7 +260,8 @@
                                   ctx   (reload-ctx host specs spec group opts)]
                               (strategy/reload! spec ctx)))
                           grouped)]
-        (merge-reports reports opts)))))
+        (cond-> (merge-reports reports opts)
+          (seq slept) (assoc :hot/dormant slept))))))
 
 (defn reload-addon!
   "Reload ONE addon by id, cascading to its dependents. This is what the

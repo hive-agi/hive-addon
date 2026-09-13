@@ -66,6 +66,12 @@
    (hive-addon.hot.strategy). Absent means the default chain selects one. It is
    an open :keyword, never an enum — the strategy set is extensible by any
    module, and closing it here would be the defect.
+
+   :addon/lifecycle is a hive-addon.lifecycle.schema/LifecycleDecl (:policy
+   :eager|:lazy|:pinned, :idle-ms). :addon/surface is a Surface: the tools and
+   contributed commands a dormant addon is advertised by. The lifecycle ignores
+   a malformed key in either (the host defaults apply, and a lazy addon with no
+   usable surface mounts eagerly) rather than refusing the mount.
    Open."
   [:map {:closed false}
    [:addon/id s/AddonId]
@@ -82,6 +88,8 @@
    [:addon/extension-points {:optional true :default []} ext/ExtensionPoints]
    [:addon/init-retry {:optional true} InitRetryPolicy]
    [:addon/reload-strategy {:optional true} :keyword]
+   [:addon/lifecycle {:optional true} [:map-of :keyword :any]]
+   [:addon/surface {:optional true} [:map-of :keyword :any]]
    [:addon/description {:optional true} [:maybe :string]]
    [:addon/author {:optional true} [:maybe :string]]
    [:addon/license {:optional true} [:maybe :string]]
