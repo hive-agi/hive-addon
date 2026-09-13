@@ -34,7 +34,8 @@
             [hive-addon.hot.mount-driver :as driver]
             [hive-addon.hot.source :as source]
             [hive-addon.hot.strategy :as strategy]
-            [hive-dsl.result :as r]))
+            [hive-dsl.result :as r]
+            [hive-addon.wire :as wire]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -360,13 +361,24 @@
 
 (defn status
   "Current hot-reload status: hive-hot availability, its component registry, and
-   the installed strategy chain."
+   the installed strategy chain.
+
+   Every value is DATA. This report is rendered by tool surfaces that serialize
+   it, so `no-reload` is projected to strings here rather than handed over as
+   the symbol set hive-hot's :no-reload option actually wants: a symbol is no
+   more serializable than the callback closures the component registry holds,
+   and both used to reach the wire from this one map.
+
+   hive-hot's own report is folded through the shared wire fold rather than
+   trusted, because the host consumes hive-hot as a PUBLISHED JAR: a facade
+   whose report throws or not depending on which release is on the classpath is
+   not a report."
   []
   (let [hot-status (hot-var 'hive-hot.core/status)]
     {:hot/available? (available?)
      :hot/strategies (mapv strategy/-strategy-id (strategy/installed-strategies))
-     :hot/no-reload no-reload
-     :hot/hive-hot (when hot-status (hot-status))}))
+     :hot/no-reload (mapv str (sort no-reload))
+     :hot/hive-hot (when hot-status (wire/json-safe (hot-status)))}))
 
 ;; =============================================================================
 ;; Re-exports — the facade surface

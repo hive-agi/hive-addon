@@ -486,7 +486,11 @@
 (deftest status-reports-the-chain-and-the-interlock
   (let [s (hot/status)]
     (is (= [:restart-required :in-place :inert :remount] (:hot/strategies s)))
-    (is (contains? (:hot/no-reload s) 'hive-addon.protocol))
+    ;; the interlock is REPORTED as strings: a symbol is as unserializable as
+    ;; the callback closures that used to ride along in this same map, and the
+    ;; report crosses a serializer. hot/no-reload itself still holds symbols,
+    ;; which is what hive-hot's :no-reload option reads.
+    (is (contains? (set (:hot/no-reload s)) "hive-addon.protocol"))
     (is (boolean? (:hot/available? s)))))
 
 ;; =============================================================================
