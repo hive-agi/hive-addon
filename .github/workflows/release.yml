@@ -10,6 +10,10 @@ on:
       - 'src/**'
       - 'resources/**'
       - 'deps.edn'
+      # version.edn declares :src-dirs, i.e. WHAT the jar packs. A change here
+      # changes the artifact even when no source line moved: 1.0.9 shipped
+      # without resources/clj-kondo.exports because :src-dirs said ["src"].
+      - 'version.edn'
   # A push can only ever mint a patch. A minor or major is an act someone
   # takes, so the level is a dispatch input, as in hive-spi.
   workflow_dispatch:
