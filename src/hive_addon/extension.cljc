@@ -130,19 +130,28 @@
         opening (get (openers specs) capability #{})]
     (set/difference filling opening)))
 
+(defn- merge-by-id
+  "[[addon-id v] ...] -> {addon-id v}, combining the values of a repeated id
+   with `f` rather than keeping only the last."
+  [f entries]
+  (reduce (fn [acc [id v]]
+            (if (contains? acc id) (update acc id f v) (assoc acc id v)))
+          {} entries))
+
 (defn vacant
   "`specs` -> {addon-id #{capability}}: points opened with no tenant.
 
    The mirror of a mount plan's `:unmet-capabilities`. A vacant point is a seam
-   no provider has ever exercised end to end."
+   no provider has ever exercised end to end. Specs sharing an :addon/id
+   contribute to ONE entry, the union of their empty points."
   [specs]
-  (into {}
-        (keep (fn [spec]
-                (let [empty-points (into #{}
-                                         (remove #(seq (tenants specs %)))
-                                         (point-capabilities spec))]
-                  (when (seq empty-points) [(:addon/id spec) empty-points]))))
-        specs))
+  (merge-by-id set/union
+               (keep (fn [spec]
+                       (let [empty-points (into #{}
+                                                (remove #(seq (tenants specs %)))
+                                                (point-capabilities spec))]
+                         (when (seq empty-points) [(:addon/id spec) empty-points])))
+                     specs)))
 
 (defn- accounted
   "The capabilities `specs` reference at all: opened as a point, required of a
@@ -158,30 +167,32 @@
 
    The mirror of `vacant`. A capability here is neither some addon's extension
    point, nor any addon's `:addon/requires-capabilities`, nor standard, so
-   nothing in the system can reach what this addon registered."
+   nothing in the system can reach what this addon registered. Specs sharing
+   an :addon/id contribute to ONE entry, the union of their stray offers."
   [specs]
   (let [known (accounted specs)]
-    (into {}
-          (keep (fn [spec]
-                  (let [stray (into #{} (remove known) (:addon/capabilities spec #{}))]
-                    (when (seq stray) [(:addon/id spec) stray]))))
-          specs)))
+    (merge-by-id set/union
+                 (keep (fn [spec]
+                         (let [stray (into #{} (remove known) (:addon/capabilities spec #{}))]
+                           (when (seq stray) [(:addon/id spec) stray])))
+                       specs))))
 
 (defn over-subscribed
   "`specs` -> {addon-id {capability #{tenant-id}}}: `:cardinality/one` points
-   filled by more than one provider."
+   filled by more than one provider. Specs sharing an :addon/id contribute to
+   ONE entry."
   [specs]
-  (into {}
-        (keep (fn [spec]
-                (let [clashes (into {}
-                                    (keep (fn [[c point]]
-                                            (when (= :cardinality/one
-                                                     (:extension/cardinality point :cardinality/many))
-                                              (let [ts (tenants specs c)]
-                                                (when (> (count ts) 1) [c ts])))))
-                                    (index spec))]
-                  (when (seq clashes) [(:addon/id spec) clashes]))))
-        specs))
+  (merge-by-id (partial merge-with set/union)
+               (keep (fn [spec]
+                       (let [clashes (into {}
+                                           (keep (fn [[c point]]
+                                                   (when (= :cardinality/one
+                                                            (:extension/cardinality point :cardinality/many))
+                                                     (let [ts (tenants specs c)]
+                                                       (when (> (count ts) 1) [c ts])))))
+                                           (index spec))]
+                         (when (seq clashes) [(:addon/id spec) clashes])))
+                     specs)))
 
 (defn report
   "`specs` -> {:openers :providers :vacant :unconsumed :over-subscribed}.

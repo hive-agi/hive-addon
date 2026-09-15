@@ -144,6 +144,14 @@
     (is (empty? (:vacant rep)))
     (is (= {"hive.stray" #{:nobody-accepts-this}} (:unconsumed rep)))))
 
+(deftest a-shared-addon-id-unions-its-diagnostics
+  (let [a (spec "dup" {:addon/extension-points [(point :lenses)]
+                       :addon/capabilities #{:stray-a}})
+        b (spec "dup" {:addon/extension-points [(point :vessel)]
+                       :addon/capabilities #{:stray-b}})]
+    (is (= {"dup" #{:lenses :vessel}} (ext/vacant [a b])))
+    (is (= {"dup" #{:stray-a :stray-b}} (ext/unconsumed [a b])))))
+
 ;; =============================================================================
 ;; The outermost caller
 ;; =============================================================================
@@ -222,11 +230,23 @@
              (every? ids (keys (:unconsumed rep)))
              (every? ids (into #{} cat (vals (:providers rep))))
              (every? ids (into #{} cat (vals (:openers rep))))
-             ;; only an addon that opened a point can be vacant
+             ;; only an addon that opened a point can be vacant; :in draws ids
+             ;; freely, so an id may name several specs and the point may be
+             ;; opened by any of them
              (every? (fn [[id caps]]
-                       (let [s (first (filter #(= id (:addon/id %)) specs))]
-                         (every? (ext/point-capabilities s) caps)))
+                       (let [opened (into #{}
+                                          (comp (filter #(= id (:addon/id %)))
+                                                (mapcat ext/point-capabilities))
+                                          specs)]
+                         (every? opened caps)))
                      (:vacant rep))
+             ;; nothing is lost: every spec's untenanted point is reported under
+             ;; its id, even when another spec shares that id
+             (every? (fn [s]
+                       (every? (fn [c] (or (seq (ext/tenants specs c))
+                                           (contains? (get (:vacant rep) (:addon/id s)) c)))
+                               (ext/point-capabilities s)))
+                     specs)
              (mirrors? rep)
              (unconsumed-is-never-opened-or-standard? specs rep))))})
 
