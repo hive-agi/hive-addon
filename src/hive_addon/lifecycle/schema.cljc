@@ -78,8 +78,9 @@
    [:last-error {:optional true} [:maybe :string]]])
 
 (def KeepReason
-  "Why a sweep left an addon mounted."
-  [:enum :pinned :eager :not-active :in-flight :dependent-active :fresh :never-used])
+  "Why a sweep left an addon mounted. :no-surface — nothing could be advertised
+   for it while dormant, so it could never be woken again."
+  [:enum :pinned :eager :not-active :no-surface :in-flight :dependent-active :fresh :never-used])
 
 (def SweepPlan
   ":evict is ordered dependents-first, so evicting in order never pulls an
@@ -100,13 +101,18 @@
    [:errors {:optional true} [:sequential :string]]])
 
 (def EvictionReport
+  "Outcome of evict!. A REFUSAL is never dressed as success: it carries
+   :refused? true, :ok? false and the :reason. :teardown/data-preserved? is
+   present only when something was actually released (:evicted? true), and is
+   then computed from what the host's unmount answered."
   [:map {:closed false}
    [:addon/id s/AddonId]
    [:ok? :boolean]
    [:evicted? :boolean]
+   [:refused? {:optional true} :boolean]
    [:reason {:optional true} [:or KeepReason :keyword]]
    [:parts-closed {:optional true} [:sequential :keyword]]
-   [:teardown/data-preserved? [:= true]]
+   [:teardown/data-preserved? {:optional true} :boolean]
    [:errors {:optional true} [:sequential :string]]])
 
 (def BootReport

@@ -21,7 +21,8 @@
             [hive-addon.mount.solve :as solve]
             [hive-addon.protocol :as proto]
             [hive-dsl.result :as r]
-            [hive-addon.mount.entitlement :as ent])
+            [hive-addon.mount.entitlement :as ent]
+            [hive-addon.mount.injected :as injected])
   (:import [java.util.jar JarFile]
            [java.net URL]
            [java.io File]))
@@ -97,8 +98,16 @@
 (defn discover-specs
   "Scan the classpath for META-INF/hive-addons/*.edn and parse each into a
    MountSpec. Returns {:specs [MountSpec] :errors [{:url .. :errors ..}]}.
-   Result-guarded: a bad file becomes an :errors entry, never aborts the scan."
-  ([] (discover-specs (.getContextClassLoader (Thread/currentThread))))
+   Result-guarded: a bad file becomes an :errors entry, never aborts the scan.
+
+   The no-argument arity is the IMAGE's view: the calling thread's context
+   loader UNIONED with the injected-spec registry (hive-addon.mount.injected),
+   so an addon injected from another thread's DynamicClassLoader is still
+   discovered here. The classpath wins a tie by id. Passing a classloader
+   explicitly asks for exactly that loader's manifests and nothing else."
+  ([]
+   (update (discover-specs (.getContextClassLoader (Thread/currentThread)))
+           :specs injected/union-specs (injected/injected-specs)))
   ([^ClassLoader classloader]
    (reduce
     (fn [acc url]
@@ -333,6 +342,46 @@
                        :runtimes (mapv (juxt :runtime/id :ok?) (:runtimes report))})
       report)))
 
+(defn- register-and-init!
+  "The shared tail of every mount: register INSTANCE for SPEC, verify the host
+   really took it, initialize it with CONFIG, and provision its runtime. Returns
+   a MountResult. Never throws."
+  [spec instance host config retry-policy on-event sleep-fn provision]
+  (let [id  (:addon/id spec)
+        reg (r/try-effect (port/register! host instance))]
+    (cond
+      (r/err? reg)
+      (mount-result id false :registered :errors [(:message reg)])
+
+      (not (registration-took? host id instance))
+      (do
+        (emit! on-event {:event :mount/registration-refused
+                         :level :error
+                         :addon/id id})
+        (mount-result id false :registered
+                      :errors [(str "host kept a different instance for " id
+                                    " — register! did not replace. A host driving a "
+                                    "remount must accept the new instance; otherwise "
+                                    "the stale one stays live.")]))
+
+      :else
+      (let [ir     (retry-init! host id config retry-policy on-event sleep-fn)
+            result (mount-result id (boolean (:success? ir)) :initialized
+                                 :errors (:errors ir)
+                                 :already-initialized? (:already-initialized? ir)
+                                 :init-attempts (:init-attempts ir))]
+        (if-let [runtime (when (and provision (:success? ir))
+                           (provision-runtime! provision spec instance on-event))]
+          (assoc result :runtime runtime)
+          result)))))
+
+(defn- mount-config
+  "(r/ok {:config .. :retry-policy ..}) for SPEC, or the error that stopped it."
+  [spec host all-specs resolve-config init-retry]
+  (r/try-effect
+   {:config (inject-dependencies (resolve-config spec) host spec all-specs)
+    :retry-policy (retry-policy spec init-retry)}))
+
 (defn- mount-one
   "Attempt to mount a single spec into host. Returns a MountResult. Never
    throws — every failure is folded into the result (graceful degrade).
@@ -360,9 +409,7 @@
           (mount-result id false :resolved
                         :errors [(:constructor/error resolution)]
                         :constructor-resolution resolution)
-          (let [cfg (r/try-effect
-                     {:config (inject-dependencies (resolve-config spec) host spec all-specs)
-                      :retry-policy (retry-policy spec init-retry)})]
+          (let [cfg (mount-config spec host all-specs resolve-config init-retry)]
             (if (r/err? cfg)
               (mount-result id false :config :errors [(:message cfg)])
               (let [{:keys [config retry-policy]} (:ok cfg)
@@ -385,32 +432,28 @@
                                                      (pr-str (vec (sort (map str (keys instance))))))))])
 
                   :else
-                  (let [reg (r/try-effect (port/register! host instance))]
-                    (cond
-                      (r/err? reg)
-                      (mount-result id false :registered :errors [(:message reg)])
+                  (register-and-init! spec instance host config retry-policy
+                                      on-event sleep-fn provision))))))))))
 
-                      (not (registration-took? host id instance))
-                      (do
-                        (emit! on-event {:event :mount/registration-refused
-                                         :level :error
-                                         :addon/id id})
-                        (mount-result id false :registered
-                                      :errors [(str "host kept a different instance for " id
-                                                    " — register! did not replace. A host driving a "
-                                                    "remount must accept the new instance; otherwise "
-                                                    "the stale one stays live.")]))
-
-                      :else
-                      (let [ir     (retry-init! host id config retry-policy on-event sleep-fn)
-                            result (mount-result id (boolean (:success? ir)) :initialized
-                                                 :errors (:errors ir)
-                                                 :already-initialized? (:already-initialized? ir)
-                                                 :init-attempts (:init-attempts ir))]
-                        (if-let [runtime (when (and provision (:success? ir))
-                                           (provision-runtime! provision spec instance on-event))]
-                          (assoc result :runtime runtime)
-                          result)))))))))))))
+(defn- restore-one
+  "Put PREVIOUS — the instance SPEC's addon had before this mount — back into
+   HOST after the new one FAILED, re-initializing it through the same config
+   path (sibling injection included). Returns FAILED annotated with
+   :restored? and, when the restore itself failed, :restore/errors. The result
+   keeps :success? false: the NEW code did not mount; the system is up on the
+   old code."
+  [failed spec previous host all-specs resolve-config init-retry on-event sleep-fn provision]
+  (let [cfg      (mount-config spec host all-specs resolve-config init-retry)
+        restored (if (r/err? cfg)
+                   {:success? false :errors [(:message cfg)]}
+                   (let [{:keys [config retry-policy]} (:ok cfg)]
+                     (register-and-init! spec previous host config retry-policy
+                                         on-event sleep-fn provision)))]
+    (emit! on-event {:event (if (:success? restored) :mount/restored :mount/restore-failed)
+                     :level (if (:success? restored) :warn :error)
+                     :addon/id (:addon/id spec)})
+    (cond-> (assoc failed :restored? (boolean (:success? restored)))
+      (not (:success? restored)) (assoc :restore/errors (vec (:errors restored []))))))
 
 (defn mount!
   "Mount every spec in (plan :ordered) into host, in order. Returns a MountReport.
@@ -430,6 +473,15 @@
           :provision     (fn [spec instance] -> ProvisionReport | nil), run after
                          an addon initializes; its report lands on the result as
                          :runtime (see hive-addon.runtime.boundary/provisioner)
+          :fallback-instance (fn [spec] -> IAddon | nil) — the instance SPEC's
+                         addon had BEFORE this mount (a remount's snapshot). When
+                         the new one fails, that instance is put back and
+                         re-initialized IN ORDER, so the dependents mounted after
+                         it receive a live sibling. The result keeps
+                         :success? false and gains :restored? (and
+                         :restore/errors when putting it back failed too); the
+                         report lists them under :restored. A licence refusal is
+                         never restored around.
           :on-event      (fn [event-map])
           :sleep-fn      (fn [milliseconds])}.
 
@@ -439,7 +491,8 @@
    silently drop those siblings from :mount/dependencies, handing the remounted
    addon a thinner config than its original mount got."
   ([plan host] (mount! plan host {}))
-  ([plan host {:keys [resolve-config init-retry on-event sleep-fn license-gate peer-specs provision]
+  ([plan host {:keys [resolve-config init-retry on-event sleep-fn license-gate peer-specs
+                      provision fallback-instance]
                :or {resolve-config port/resolve-config-default
                     init-retry {}
                     on-event (constantly nil)
@@ -447,13 +500,26 @@
    (let [gate    (or license-gate (ent/installed-gate))
          ordered (:ordered plan)
          peers   (or (seq peer-specs) ordered)
-         results (mapv #(mount-one % host peers resolve-config
-                                   init-retry on-event sleep-fn gate provision)
+         previous (fn [spec]
+                    (when fallback-instance
+                      (let [p (r/rescue nil (fallback-instance spec))]
+                        (when (proto/addon? p) p))))
+         results (mapv (fn [spec]
+                         (let [res (mount-one spec host peers resolve-config
+                                              init-retry on-event sleep-fn gate provision)
+                               old (when-not (or (:success? res) (= :entitlement (:phase res)))
+                                     (previous spec))]
+                           (if old
+                             (restore-one res spec old host peers resolve-config
+                                          init-retry on-event sleep-fn provision)
+                             res)))
                        ordered)]
-     {:mounted results
-      :order   (mapv :addon/id ordered)
-      :skipped (into #{} (comp (remove :success?) (map :addon/id)) results)
-      :ok?     (every? :success? results)})))
+     (cond-> {:mounted results
+              :order   (mapv :addon/id ordered)
+              :skipped (into #{} (comp (remove :success?) (map :addon/id)) results)
+              :ok?     (every? :success? results)}
+       (some :restored? results)
+       (assoc :restored (into [] (comp (filter :restored?) (map :addon/id)) results))))))
 
 ;; =============================================================================
 ;; dry-run — same shape, NO effects (golden-replay parity)
@@ -524,3 +590,25 @@
               :teardown/data-preserved? true}
        (seq errors)   (assoc :errors errors)
        (seq runtimes) (assoc :runtime runtimes)))))
+
+;; =============================================================================
+;; unregister! — plug out, through the optional IMountUnregister port
+;; =============================================================================
+
+(defn unregister!
+  "Drop ADDON-IDS from HOST's registry, AFTER they were torn down. Goes through
+   hive-addon.mount.port/IMountUnregister; a host that does not implement it is
+   not an error — every id is reported under :unsupported, which tells the
+   caller the host still holds an inert (shut-down) entry for it.
+
+   Returns {:unregistered [id] :unsupported [id] :errors [string]}. Never throws."
+  [host addon-ids]
+  (if-not (satisfies? port/IMountUnregister host)
+    {:unregistered [] :unsupported (vec addon-ids) :errors []}
+    (reduce (fn [acc id]
+              (let [res (r/try-effect (port/unregister! host id))]
+                (if (r/err? res)
+                  (update acc :errors conj (str id ": " (:message res)))
+                  (update acc :unregistered conj id))))
+            {:unregistered [] :unsupported [] :errors []}
+            addon-ids)))

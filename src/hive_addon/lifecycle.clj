@@ -281,8 +281,21 @@
 ;; Eviction
 ;; =============================================================================
 
-(defn- eviction-report [id evicted? & kvs]
-  (apply assoc {:addon/id id :ok? true :evicted? evicted? :teardown/data-preserved? true} kvs))
+(defn- refused-eviction
+  "An EvictionReport for an eviction that did not happen. Never dressed as
+   success, and it makes no data-preservation claim: nothing was released."
+  [id reason & {:as extra}]
+  (merge {:addon/id id :ok? false :evicted? false :refused? true :reason reason} extra))
+
+(defn- released-eviction
+  "An EvictionReport for an addon that was released. :teardown/data-preserved?
+   is carried over from what the host's unmount CLAIMED; a host that makes no
+   claim gets no verdict (absent, i.e. unknown) rather than an asserted true."
+  [id unmounted & {:as extra}]
+  (merge (cond-> {:addon/id id :ok? true :evicted? true}
+           (contains? unmounted :teardown/data-preserved?)
+           (assoc :teardown/data-preserved? (true? (:teardown/data-preserved? unmounted))))
+         extra))
 
 (defn- claim-eviction!
   "Move ID :active -> :evicting when nothing is in flight. True when claimed."
@@ -298,41 +311,60 @@
   (into [] (comp (remove #{id}) (filter #(active? mgr %)))
         (policy/dependent-closure @(:specs mgr) #{id})))
 
+(def eviction-guards
+  "Why an eviction is REFUSED, as an ordered rule table: [reason refuses?]
+   where (refuses? mgr id state force?) answers true to refuse for that reason.
+   The first rule that fires is the report's :reason. A new reason is a new
+   row; do-evict! never changes.
+
+   :no-surface refuses a surface-less (e.g. hooks-only) addon: evicted, it
+   would have no stub to route a call back through, so its hooks and whole
+   contribution would vanish and it would never re-mount. :force? overrides it
+   exactly as it overrides :pinned — the operator then owns the consequence."
+  [[:not-active       (fn [_ _ st _] (not= :active (:phase st)))]
+   [:pinned           (fn [_ _ st force?] (and (not force?) (= :pinned (get-in st [:lifecycle :policy]))))]
+   [:no-surface       (fn [mgr id _ force?] (and (not force?) (nil? (first (surface-of mgr id)))))]
+   [:dependent-active (fn [mgr id _ _] (boolean (seq (active-dependents mgr id))))]
+   [:in-flight        (fn [mgr id _ _] (not (claim-eviction! mgr id)))]])
+
+(defn- refusal-reason
+  "The first guard in `eviction-guards` that refuses, or nil to proceed. The
+   :in-flight guard CLAIMS the eviction when it lets it through, so it must stay
+   last."
+  [mgr id st force?]
+  (some (fn [[reason refuses?]] (when (refuses? mgr id st force?) reason)) eviction-guards))
+
 (defn- do-evict! [mgr id force?]
-  (let [st (state mgr id)
-        lc (:lifecycle st)]
-    (cond
-      (nil? st)                        (eviction-report id false :ok? false :reason :unknown
-                                                        :errors [(str "no governed addon " (pr-str id))])
-      (not= :active (:phase st))       (eviction-report id false :reason :not-active)
-      (and (not force?) (= :pinned (:policy lc))) (eviction-report id false :reason :pinned)
-      (seq (active-dependents mgr id)) (eviction-report id false :reason :dependent-active)
-      (not (claim-eviction! mgr id))   (eviction-report id false :reason :in-flight)
-      :else
-      (do
-        (learn-surface! mgr id)
-        (let [closed (part/close-owner! id)
-              res    (r/try-effect (lport/-unmount! (:host mgr) id))
-              errs   (cond (r/err? res) [(:message res)]
-                           (:ok? (:ok res)) nil
-                           :else (vec (:errors (:ok res) ["unmount failed"])))]
-          (update-state! mgr id #(-> % (assoc :phase :dormant :in-flight 0)
-                                     (update :evictions inc)
-                                     (assoc :last-error (first errs))))
-          (install-stubs! mgr id)
-          (when-let [f (get-in mgr [:opts :on-evicted])] (r/rescue nil (f id)))
-          (cond-> (eviction-report id true :parts-closed (vec closed))
-            (seq errs) (assoc :errors errs)))))))
+  (let [st (state mgr id)]
+    (if (nil? st)
+      (refused-eviction id :unknown :errors [(str "no governed addon " (pr-str id))])
+      (if-let [reason (refusal-reason mgr id st force?)]
+        (refused-eviction id reason)
+        (do
+          (learn-surface! mgr id)
+          (let [closed (part/close-owner! id)
+                res    (r/try-effect (lport/-unmount! (:host mgr) id))
+                out    (if (r/err? res) {:ok? false :errors [(:message res)]} (:ok res))
+                errs   (when-not (:ok? out) (vec (:errors out ["unmount failed"])))]
+            (update-state! mgr id #(-> % (assoc :phase :dormant :in-flight 0)
+                                       (update :evictions inc)
+                                       (assoc :last-error (first errs))))
+            (install-stubs! mgr id)
+            (when-let [f (get-in mgr [:opts :on-evicted])] (r/rescue nil (f id)))
+            (cond-> (released-eviction id out :parts-closed (vec closed))
+              (seq errs) (assoc :errors errs))))))))
 
 (defn evict!
   "Release ID: shut it down, withdraw its surface, advertise stubs. Refuses while
-   it is in flight or an active addon depends on it. OPTS {:force? true} also
-   evicts a pinned or eager addon. Returns an EvictionReport."
+   it is in flight, an active addon depends on it, it is pinned, or it has no
+   surface a stub could advertise (see `eviction-guards`). OPTS {:force? true}
+   overrides :pinned and :no-surface. Returns an EvictionReport; a refusal is
+   :refused? true / :ok? false with its :reason."
   ([mgr id] (evict! mgr id {}))
   ([mgr id {:keys [force?]}]
    (let [res (with-lock mgr #(do-evict! mgr id (boolean force?)))]
      (if (r/err? res)
-       (eviction-report id false :ok? false :reason :lock-timeout :errors [(:message res)])
+       (refused-eviction id :lock-timeout :errors [(:message res)])
        (:ok res)))))
 
 ;; =============================================================================
@@ -421,24 +453,64 @@
 
 (defn adopt!
   "Govern SPECS that are ALREADY mounted (hot inject, a host's own boot) as active
-   addons under the resolved policy. Returns the adopted ids."
+   addons under the resolved policy — the manifest's :addon/lifecycle under the
+   manager's defaults and overrides. Returns the adopted ids.
+
+   An adopted addon that nothing could advertise while dormant cannot be :lazy:
+   it is governed as :eager with :downgraded :no-surface (exactly as boot! does),
+   until a surface is learned for it."
   [mgr specs]
   (let [known (set (map :addon/id @(:specs mgr)))]
     (swap! (:specs mgr) into (remove #(contains? known (:addon/id %)) specs)))
   (let [lcs (lifecycles mgr)
         t   (now mgr)]
     (into [] (map (fn [{:keys [addon/id]}]
-                    (swap! (:states mgr) update id
-                           (fn [st] (assoc (or st (fresh-state id (get lcs id)))
-                                           :phase :active :last-used-ms t)))
+                    (let [[s src] (surface-of mgr id)
+                          lc      (get lcs id)
+                          no-surf (and (= :lazy (:policy lc)) (not (policy/lazy-permitted? s)))]
+                      (swap! (:states mgr) update id
+                             (fn [st]
+                               (cond-> (assoc (or st (fresh-state id lc))
+                                              :phase :active :last-used-ms t
+                                              :surface/source src)
+                                 no-surf (-> (assoc-in [:lifecycle :policy] :eager)
+                                             (assoc :downgraded :no-surface))))))
                     id))
           specs)))
 
+(defn forget!
+  "Stop governing IDS entirely — the inverse of adopt!, for an addon being
+   plugged OUT. Withdraws any stubs advertised for them and drops their spec,
+   state and cached surface. Does NOT shut anything down: the caller tears the
+   addon down first. Returns the ids that were governed."
+  [mgr ids]
+  (let [res (with-lock mgr
+              (fn []
+                (let [governed (into [] (filter #(state mgr %)) ids)
+                      gone     (set ids)]
+                  (doseq [id governed]
+                    (r/rescue nil (lport/-remove-stubs! (:host mgr) id)))
+                  (swap! (:specs mgr) (fn [ss] (into [] (remove #(contains? gone (:addon/id %))) ss)))
+                  (swap! (:states mgr) #(apply dissoc % ids))
+                  (swap! (:surfaces mgr) #(apply dissoc % ids))
+                  governed)))]
+    (if (r/err? res) [] (:ok res))))
+
 (defn set-policy!
-  "Change ID's lifecycle at runtime (e.g. pin it). Returns the new Lifecycle."
-  [mgr id decl]
-  (-> (swap! (:states mgr) update-in [id :lifecycle] merge decl)
-      (get-in [id :lifecycle])))
+  "Change ID's lifecycle at runtime (e.g. pin it). Returns the new Lifecycle.
+
+   Making an addon :lazy that has no surface a stub could advertise is REFUSED
+   unless OPTS {:force? true}: the lifecycle is left as it was and returned with
+   :refused :no-surface, because a lazy surface-less addon, once evicted, could
+   never be woken again."
+  ([mgr id decl] (set-policy! mgr id decl {}))
+  ([mgr id decl {:keys [force?]}]
+   (if (and (not force?)
+            (= :lazy (:policy decl))
+            (not (policy/lazy-permitted? (first (surface-of mgr id)))))
+     (assoc (:lifecycle (state mgr id)) :refused :no-surface)
+     (-> (swap! (:states mgr) update-in [id :lifecycle] merge decl)
+         (get-in [id :lifecycle])))))
 
 ;; =============================================================================
 ;; Status and installation
@@ -486,8 +558,15 @@
   (-mount! [_ specs peers]
     (boundary/mount! {:ordered specs} mount-host (assoc mount-opts :peer-specs peers)))
   (-unmount! [_ id]
-    (let [td (boundary/teardown! mount-host [id])]
-      {:ok? (empty? (:errors td)) :errors (vec (:errors td))}))
+    ;; "Shut down ... and forget the instance": teardown, then plug out through
+    ;; the optional IMountUnregister port (a host without it keeps an inert
+    ;; entry, which the next mount! replaces).
+    (let [td (boundary/teardown! mount-host [id])
+          un (boundary/unregister! mount-host [id])
+          es (into (vec (:errors td)) (:errors un))]
+      {:ok? (empty? es) :errors es
+       :torn-down (vec (:torn-down td))
+       :teardown/data-preserved? (:teardown/data-preserved? td)}))
   (-install-stubs! [_ id s activate!]
     (swap! stubs assoc id {:surface s :activate! activate!})
     nil)
