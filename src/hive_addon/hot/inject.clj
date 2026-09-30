@@ -1,5 +1,6 @@
 (ns hive-addon.hot.inject
-  "Inject an addon that was NOT on the classpath when the host booted.
+  "Plug an addon IN that was NOT on the classpath when the host booted — and
+   plug it back OUT.
 
    `inject!` is the mount pipeline run over a slice that did not exist yet:
    put the addon's paths on the live classpath, discover the manifests under
@@ -8,7 +9,15 @@
    new specs against the peers already mounted, tear down the mounted
    dependents that now have a new sibling to receive, mount the slice through
    the ordinary IMountDriver, and register the new addons with hive-hot so
-   they reload like the rest.
+   they reload like the rest. Every injected addon that mounts is REMEMBERED
+   in the injected-spec registry (hive-addon.mount.injected), which classpath
+   discovery unions in, so it stays discoverable from any thread; and it is
+   ADOPTED by the installed lifecycle manager under its manifest policy.
+
+   `eject!` is the inverse: teardown, unregister through the optional
+   IMountUnregister port, un-govern, un-hot, stop watching the dirs nobody else
+   needs, forget the registry entry — and REPORT what cannot be removed (the
+   classpath URLs a URLClassLoader cannot drop, the namespaces still loaded).
 
    Classpath extension is a JVM concern: the URL is added to the highest
    DynamicClassLoader above the calling thread's context loader, which is the
@@ -26,14 +35,13 @@
             [hive-addon.hot.cascade :as cascade]
             [hive-addon.hot.mount-driver :as driver]
             [hive-addon.hot.port :as hport]
-            [hive-addon.hot.source :as source]
-            [hive-addon.mount.boundary :as boundary]
-            [hive-addon.mount.port :as port]
-            [hive-dsl.result :as r]
-            [hive-addon.mount.injected :as injected]
-            [hive-addon.lifecycle :as lc]
             [hive-addon.hot.report :as verdict]
-            [clojure.string :as str])
+            [hive-addon.hot.source :as source]
+            [hive-addon.lifecycle :as lc]
+            [hive-addon.mount.boundary :as boundary]
+            [hive-addon.mount.injected :as injected]
+            [hive-addon.mount.port :as port]
+            [hive-dsl.result :as r])
   (:import [clojure.lang DynamicClassLoader RT]
            [java.io File]
            [java.net URL URLClassLoader]))

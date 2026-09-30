@@ -2,16 +2,22 @@
   "Effectful boundary of the addon mounter — all IO and var resolution, injected
    through the IMountHost port and an optional config resolver.
 
-   Collect: discover-specs scans the classpath for META-INF/hive-addons/*.edn.
+   Collect: discover-specs scans the classpath for META-INF/hive-addons/*.edn
+   (the no-arg arity unions in the injected-spec registry, so an addon injected
+   from another thread's loader is still discovered).
    Promote: parse-spec turns an EDN string into a validated MountSpec Result.
    Pipeline is hive-addon.mount.solve (pure, elsewhere).
-   Boundary: mount!/dry-run/teardown! resolve constructors, inject already-mounted
-   sibling instances into each dependent's config (DIP), and drive the host.
+   Boundary: mount!/dry-run/teardown!/unregister! resolve constructors, inject
+   already-mounted sibling instances into each dependent's config (DIP), and
+   drive the host.
 
    mount! GRACEFULLY DEGRADES: a spec that fails at any step is recorded in the
    MountReport and the loop CONTINUES; already-mounted addons are NEVER torn down
-   on a mid-DAG failure. teardown! shuts down in reverse mount order and always
-   reports :teardown/data-preserved? true (shutdown! never deletes data)."
+   on a mid-DAG failure. Given :fallback-instance, a failed spec's PREVIOUS
+   instance is put back in order (:restored?). teardown! shuts down in reverse
+   mount order and reports :teardown/data-preserved? true (shutdown! never
+   deletes data). unregister! plugs torn-down addons out through the optional
+   IMountUnregister port and reports hosts without it as :unsupported."
   (:require [hive-addon.diagnostic :as diagnostic]
             [clojure.edn :as edn]
             [clojure.java.io :as io]
