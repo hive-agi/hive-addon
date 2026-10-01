@@ -20,6 +20,8 @@ not declare, is neither.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-09-30
+
 ### Added
 
 - `hive-addon.tool-contract`: the contract a tool def must meet to be served
