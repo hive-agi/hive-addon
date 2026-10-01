@@ -45,7 +45,11 @@
 ;; Manager value
 ;; =============================================================================
 
-(defrecord Manager [host specs states surfaces lock sweeper opts])
+;; SEAT is an atom shared by every Manager built over the same state (see
+;; reseat-host!); it holds the Manager currently governing that state. Anything
+;; that touches the host resolves the manager through it at CALL time, never
+;; through a Manager value captured earlier (Capture-by-Var).
+(defrecord Manager [host specs states surfaces lock sweeper opts seat])
 
 (defn- system-now [] (System/currentTimeMillis))
 
@@ -64,16 +68,27 @@
      :lock-timeout-ms"
   [{:keys [host specs] :as opts}]
   {:pre [(satisfies? lport/ILifecycleHost host)]}
-  (->Manager host
-             (atom (vec specs))
-             (atom {})
-             (atom {})
-             (ReentrantLock.)
-             (atom nil)
-             (merge {:now-ms system-now
-                     :surface-store (lport/->NullSurfaceStore)
-                     :lock-timeout-ms default-lock-timeout-ms}
-                    (dissoc opts :host :specs))))
+  (let [seat (atom nil)
+        mgr  (->Manager host
+                        (atom (vec specs))
+                        (atom {})
+                        (atom {})
+                        (ReentrantLock.)
+                        (atom nil)
+                        (merge {:now-ms system-now
+                                :surface-store (lport/->NullSurfaceStore)
+                                :lock-timeout-ms default-lock-timeout-ms}
+                               (dissoc opts :host :specs))
+                        seat)]
+    (reset! seat mgr)
+    mgr))
+
+(defn current
+  "The Manager now governing MGR's state: the one a later reseat-host! seated,
+   else MGR itself. Resolved at call time, so a caller holding an older Manager
+   value still reaches the current host."
+  [mgr]
+  (or (some-> (:seat mgr) deref) mgr))
 
 (defn- now [mgr] ((get-in mgr [:opts :now-ms])))
 
@@ -94,11 +109,14 @@
   (policy/resolve-all @(:specs mgr) (select-keys (:opts mgr) [:defaults :overrides])))
 
 (defn- with-lock
-  "Run F holding the manager lock, or answer (r/err :lifecycle/lock-timeout)."
+  "Run (F seated) holding the manager lock, where SEATED is the manager current
+   ONCE THE LOCK IS HELD (see `current`), or answer (r/err :lifecycle/lock-timeout).
+   reseat-host! swaps the seat under this same lock, so F never sees a host that
+   a completed reseat replaced."
   [mgr f]
   (let [^ReentrantLock lock (:lock mgr)]
     (if (.tryLock lock (long (get-in mgr [:opts :lock-timeout-ms])) TimeUnit/MILLISECONDS)
-      (try (r/ok (f))
+      (try (r/ok (f (current mgr)))
            (finally (.unlock lock)))
       (r/err :lifecycle/lock-timeout {:message "lifecycle lock not acquired in time"}))))
 
@@ -146,11 +164,23 @@
 
 (declare activate!)
 
+(declare installed-manager)
+
+(defn- stub-manager
+  "The manager a stub call activates through, resolved at CALL time: the
+   installed manager when it governs MGR's state (same lock), else MGR's current
+   seat. A stub armed before a reseat therefore wakes the addon on the new host."
+  [mgr]
+  (let [inst (installed-manager)]
+    (if (and inst (identical? (:lock inst) (:lock mgr)))
+      inst
+      (current mgr))))
+
 (defn- install-stubs! [mgr id]
   (let [[s src] (surface-of mgr id)]
     (update-state! mgr id assoc :surface/source src)
     (when s
-      (r/rescue nil (lport/-install-stubs! (:host mgr) id s #(activate! mgr id))))))
+      (r/rescue nil (lport/-install-stubs! (:host mgr) id s #(activate! (stub-manager mgr) id))))))
 
 (defn- default-reload-ns!
   [roots ns-strs]
@@ -220,9 +250,9 @@
     (activation-report id true [] :already-active? true)
 
     :else
-    (let [res (with-lock mgr #(if (active? mgr id)
-                                (activation-report id true [] :already-active? true)
-                                (do-activate! mgr id)))]
+    (let [res (with-lock mgr (fn [m] (if (active? m id)
+                                       (activation-report id true [] :already-active? true)
+                                       (do-activate! m id))))]
       (if (r/err? res)
         (activation-report id false [] :errors [(:message res)])
         (:ok res)))))
@@ -362,7 +392,7 @@
    :refused? true / :ok? false with its :reason."
   ([mgr id] (evict! mgr id {}))
   ([mgr id {:keys [force?]}]
-   (let [res (with-lock mgr #(do-evict! mgr id (boolean force?)))]
+   (let [res (with-lock mgr (fn [m] (do-evict! m id (boolean force?))))]
      (if (r/err? res)
        (refused-eviction id :lock-timeout :errors [(:message res)])
        (:ok res)))))
@@ -386,7 +416,8 @@
      :parts   (part/sweep! (now mgr))}))
 
 (defn start-sweeper!
-  "Sweep every :sweep-interval-ms on a daemon thread. Idempotent."
+  "Sweep every :sweep-interval-ms on a daemon thread. Idempotent. Each tick
+   sweeps the CURRENT manager (see `current`), never the value captured here."
   ([mgr] (start-sweeper! mgr {}))
   ([mgr {:keys [interval-ms]}]
    (or @(:sweeper mgr)
@@ -397,7 +428,7 @@
                        (doto (Thread. ^Runnable runnable "hive-addon-lifecycle-sweeper")
                          (.setDaemon true)))))]
          (.scheduleWithFixedDelay ^ScheduledExecutorService exec
-                                  ^Runnable (fn [] (r/rescue nil (sweep! mgr)))
+                                  ^Runnable (fn [] (r/rescue nil (sweep! (current mgr))))
                                   ms ms TimeUnit/MILLISECONDS)
          (reset! (:sweeper mgr) {:executor exec :interval-ms ms})
          @(:sweeper mgr)))))
@@ -485,14 +516,14 @@
    addon down first. Returns the ids that were governed."
   [mgr ids]
   (let [res (with-lock mgr
-              (fn []
-                (let [governed (into [] (filter #(state mgr %)) ids)
+              (fn [m]
+                (let [governed (into [] (filter #(state m %)) ids)
                       gone     (set ids)]
                   (doseq [id governed]
-                    (r/rescue nil (lport/-remove-stubs! (:host mgr) id)))
-                  (swap! (:specs mgr) (fn [ss] (into [] (remove #(contains? gone (:addon/id %))) ss)))
-                  (swap! (:states mgr) #(apply dissoc % ids))
-                  (swap! (:surfaces mgr) #(apply dissoc % ids))
+                    (r/rescue nil (lport/-remove-stubs! (:host m) id)))
+                  (swap! (:specs m) (fn [ss] (into [] (remove #(contains? gone (:addon/id %))) ss)))
+                  (swap! (:states m) #(apply dissoc % ids))
+                  (swap! (:surfaces m) #(apply dissoc % ids))
                   governed)))]
     (if (r/err? res) [] (:ok res))))
 
@@ -535,8 +566,12 @@
 (defonce ^:private installed (atom nil))
 
 (defn install!
-  "Make MGR the installed manager and the source of the dormancy oracle."
+  "Make MGR the installed manager and the source of the dormancy oracle. MGR is
+   also SEATED: it becomes `current` for every Manager sharing its state, so a
+   host that swapped :host by assoc and re-installed is honoured by later calls.
+   Prefer reseat-host!, which does this under the manager lock."
   [mgr]
+  (some-> (:seat mgr) (reset! mgr))
   (reset! installed mgr)
   (oracle/install-dormancy! #(dormant? mgr %))
   mgr)
@@ -548,6 +583,74 @@
   nil)
 
 (defn installed-manager [] @installed)
+
+;; =============================================================================
+;; Re-seating on a new host
+;; =============================================================================
+
+(defn- dormant-ids
+  "Pure: the governed ids, in spec order, that are not mounted."
+  [specs states]
+  (into [] (comp (map :addon/id)
+                 (filter #(contains? #{:dormant :failed} (get-in states [% :phase]))))
+        specs))
+
+(defn- next-host
+  "The host to seat: HOST-FN itself when it already is an ILifecycleHost, else
+   (HOST-FN old-host)."
+  [host-fn old-host]
+  (if (satisfies? lport/ILifecycleHost host-fn) host-fn (host-fn old-host)))
+
+(defn- shares-state? [a b] (and a b (identical? (:lock a) (:lock b))))
+
+(defn- do-reseat! [m host-fn]
+  (let [h (r/try-effect (next-host host-fn (:host m)))]
+    (cond
+      (r/err? h)
+      {:ok? false :reseated? false :errors [(str "host-fn failed: " (:message h))]}
+
+      (not (satisfies? lport/ILifecycleHost (:ok h)))
+      {:ok? false :reseated? false :errors ["host-fn did not answer an ILifecycleHost"]}
+
+      :else
+      (let [seat  (or (:seat m) (atom nil))
+            nm    (assoc m :host (:ok h) :seat seat)
+            inst  (installed-manager)
+            inst? (or (nil? inst) (shares-state? inst m))
+            sw    @(:sweeper m)
+            ids   (dormant-ids @(:specs nm) @(:states nm))]
+        (reset! seat nm)
+        (when inst? (install! nm))
+        (when sw
+          (stop-sweeper! m)
+          (start-sweeper! nm {:interval-ms (:interval-ms sw)}))
+        (doseq [id ids] (install-stubs! nm id))
+        {:ok?            true
+         :reseated?      true
+         :installed?     (boolean inst?)
+         :sweeper-moved? (boolean sw)
+         :rearmed        (filterv #(some? (first (surface-of nm %))) ids)}))))
+
+(defn reseat-host!
+  "Govern MGR's addons through a new ILifecycleHost, in place. HOST-FN is the new
+   host, or (fn [old-host] new-host).
+
+   Under the manager lock it builds a Manager on the new host that SHARES MGR's
+   specs, states, surfaces, lock and sweeper, seats it (see `current`), installs
+   it when MGR's state is the installed one (or nothing is installed), moves a
+   running sweeper onto it and re-arms the stubs of every dormant addon on the
+   new host. The old host is not called. Every activation, eviction and forget!
+   resolves the seated manager once it holds the lock, so none that starts after
+   this returns can reach the old host, and none running when it is called is cut
+   short: the reseat waits for it.
+
+   Returns a ReseatReport (hive-addon.lifecycle.schema/ReseatReport); on success
+   (current mgr) is the new Manager."
+  [mgr host-fn]
+  (let [res (with-lock mgr #(do-reseat! % host-fn))]
+    (if (r/err? res)
+      {:ok? false :reseated? false :errors [(:message res)]}
+      (:ok res))))
 
 ;; =============================================================================
 ;; A host over IMountHost, for tests and hosts without a tool surface

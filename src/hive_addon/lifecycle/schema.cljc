@@ -123,6 +123,18 @@
    [:mount {:optional true} ms/MountReport]
    [:ok? :boolean]])
 
+(def ReseatReport
+  "Outcome of reseat-host!. A failed reseat (:reseated? false) left the old host
+   seated and nothing changed. :rearmed are the dormant addons whose stubs were
+   installed on the new host (a dormant addon with no surface has none)."
+  [:map {:closed false}
+   [:ok? :boolean]
+   [:reseated? :boolean]
+   [:installed? {:optional true} :boolean]
+   [:sweeper-moved? {:optional true} :boolean]
+   [:rearmed {:optional true} [:sequential s/AddonId]]
+   [:errors {:optional true} [:sequential :string]]])
+
 ;; =============================================================================
 ;; Local registry
 ;; =============================================================================
@@ -136,7 +148,8 @@
    :lifecycle/sweep-plan        SweepPlan
    :lifecycle/activation-report ActivationReport
    :lifecycle/eviction-report   EvictionReport
-   :lifecycle/boot-report       BootReport})
+   :lifecycle/boot-report       BootReport
+   :lifecycle/reseat-report     ReseatReport})
 
 (def registry
   (mr/composite-registry ms/registry (mr/registry lifecycle-schemas)))
