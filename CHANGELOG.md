@@ -22,6 +22,18 @@ not declare, is neither.
 
 ### Added
 
+- `hive-addon.tool-contract`: the contract a tool def must meet to be served
+  at an MCP root — non-blank `:name` and `:description`, and an `:inputSchema`
+  of type `"object"` with at least one property. A client with no source access
+  can only operate a tool through its schema, so an empty schema is an error.
+  A property without a `:description` is reported as a warning.
+  - `assert-root-tool!` / `assert-root-tools!` for hosts at registration.
+  - `def-root-tool` checks a literal tool map at macroexpansion, so a violation
+    fails compilation, and checks the evaluated value when the def runs.
+  - `hive-addon.tool-contract.test/deftest-root-tools` for an addon's suite.
+  - `hive-addon.tool-contract.check` CLI and the reusable workflow
+    `.github/workflows/root-tool-contract.yml` for an addon's CI.
+
 - Every opaque-kernel request is bounded by a deadline. Two optional keys on
   the spec carried as `:addon/config` set them: `:opaque/init-timeout-ms` for
   the first request after each kernel start (default 60000, since a cold

@@ -1,0 +1,53 @@
+name: root-tool-contract
+
+# Reusable gate for any IAddon repo: every tool its addon contributes must
+# satisfy hive-addon.tool-contract/RootToolDef (non-blank name + description,
+# inputSchema of type "object" with at least one property).
+#
+#   jobs:
+#     root-tools:
+#       uses: hive-agi/hive-addon/.github/workflows/root-tool-contract.yml@main
+#       with:
+#         addon-ctors: my.addon/->addon
+#
+# The repo's classpath must carry hive-addon >= the release that ships
+# hive-addon.tool-contract (directly or transitively).
+on:
+  workflow_call:
+    inputs:
+      addon-ctors:
+        description: Space-separated zero-arg fns returning an IAddon, e.g. "my.addon/->addon".
+        required: true
+        type: string
+      aliases:
+        description: deps.edn aliases to add to the classpath, e.g. ":dev" (no main-opts are used from them).
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  contract:
+    name: root tool contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeLaGuardo/setup-clojure@13.0
+        with:
+          cli: latest
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.gitlibs
+          key: cljdeps-${{ hashFiles('deps.edn') }}
+          restore-keys: cljdeps-
+
+      - name: check addon tools
+        env:
+          ALIASES: ${{ inputs.aliases }}
+          CTORS: ${{ inputs.addon-ctors }}
+        run: |
+          clojure -Sdeps '{:aliases {:root-tool-contract {:main-opts ["-m" "hive-addon.tool-contract.check"]}}}' \
+            "-M${ALIASES}:root-tool-contract" $CTORS
