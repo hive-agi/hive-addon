@@ -14,7 +14,9 @@
             [hive-addon.mount.compose :as compose]
             [hive-addon.mount.port :as port]
             [hive-addon.mount.schema :as schema]
-            [hive-addon.mount.solve :as solve]))
+            [hive-addon.mount.solve :as solve]
+            [hive-addon.mount.entitlement :as ent]
+            [hive-addon.mount.maturity :as mat]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -116,6 +118,42 @@
 (def compose!
   "hive-addon.mount.compose/compose! — select+order+mount! into a host."
   compose/compose!)
+
+(def install-gate!
+  "hive-addon.mount.entitlement/install-gate! — install this host's licence gate."
+  ent/install-gate!)
+
+(def installed-gate
+  "hive-addon.mount.entitlement/installed-gate — the gate mount! defaults to."
+  ent/installed-gate)
+
+(def reset-gate!
+  "hive-addon.mount.entitlement/reset-gate! — restore the closed default."
+  ent/reset-gate!)
+
+(def open-gate
+  "hive-addon.mount.entitlement/open-gate — permits everything; development only."
+  ent/open-gate)
+
+(def gated?
+  "hive-addon.mount.entitlement/gated? — does this spec require a licence gate."
+  ent/gated?)
+
+(def addon-maturity
+  "hive-addon.mount.maturity/maturity: this spec's maturity claim, defaulted."
+  mat/maturity)
+
+(def maturity-at-least?
+  "hive-addon.mount.maturity/at-least?: (floor spec) maturity comparison."
+  mat/at-least?)
+
+(def maturity-declared?
+  "hive-addon.mount.maturity/declared?: did the manifest state a maturity."
+  mat/declared?)
+
+(def dormant?
+  "hive-addon.mount.maturity/dormant?: is this spec out of development."
+  mat/dormant?)
 
 (def read-layers
   "hive-addon.mount.compose/read-layers — paths -> validated plug layers."

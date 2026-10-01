@@ -1,4 +1,4 @@
-{:paths ["src"]
+{:paths ["src" "resources"]
  :deps {org.clojure/clojure {:mvn/version "1.12.6"}
 
         ;; hive-dsl — Result monad, rescue/guard DSL, error taxonomy.
@@ -7,10 +7,18 @@
 
         ;; malli — schema layer for the IAddon contract (self-contained; no hive-spi).
         ;; The addon bounded context owns its own schemas (DDD). House pin: 0.20.1.
-        metosin/malli {:mvn/version "0.20.2"}}
+        metosin/malli {:mvn/version "0.20.2"}
+        io.github.hive-agi/hive-help {:mvn/version "0.1.4"}}
 
+ ;; hive-hot is deliberately NOT in :deps. hive-addon.hot resolves it through the
+ ;; var at call time and degrades to :hot/available? false when it is absent, so
+ ;; the published lib stays a leaf library and consumers that want file-watching
+ ;; add hive-hot themselves. It appears below only so dev + the suite can exercise
+ ;; the wired path alongside the graceful-degradation one.
  :aliases
- {:dev  {:extra-paths ["dev" "test"]}
+ {:dev  {:extra-paths ["dev" "test"]
+         :extra-deps  {io.github.hive-agi/hive-hot
+                       {:git/tag "v0.1.19" :git/sha "dc27c6d"}}}
 
   :test {:extra-paths ["test"]
          :extra-deps  {io.github.cognitect-labs/test-runner
@@ -18,11 +26,18 @@
                        ;; test.check — backs the malli.generator generative leg
                        ;; of hive-addon.schema-test (also pulled transitively by
                        ;; malli, pinned here for reproducibility).
-                       org.clojure/test.check {:mvn/version "1.1.3"}}
+                       org.clojure/test.check {:mvn/version "1.1.3"}
+                       io.github.hive-agi/hive-hot
+                       {:git/tag "v0.1.19" :git/sha "dc27c6d"}
+                       ;; hive-test supplies the trifecta (golden + property +
+                       ;; mutation); hive-schemas synthesizes those facets from
+                       ;; the malli schemas in hive-addon.hot.schema. Test-only:
+                       ;; the published lib stays a leaf library.
+                       io.github.hive-agi/hive-test {:mvn/version "0.4.9"}
+                       io.github.hive-agi/hive-schemas {:mvn/version "0.1.37"}}
          :main-opts ["-m" "cognitect.test-runner"]
          :exec-fn cognitect.test-runner.api/test}
 
   ;; Build + Clojars deploy: clojure -T:build jar | clojure -T:build deploy
-  :build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.14"}
-                 slipset/deps-deploy {:mvn/version "0.2.5"}}
-          :ns-default build}}}
+  :build {:deps {io.github.hive-agi/hive-build {:mvn/version "0.1.22"}}
+          :ns-default hive-build.api}}}

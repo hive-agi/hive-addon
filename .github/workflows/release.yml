@@ -10,7 +10,22 @@ on:
       - 'src/**'
       - 'resources/**'
       - 'deps.edn'
+      # version.edn declares :src-dirs, i.e. WHAT the jar packs. A change here
+      # changes the artifact even when no source line moved: 1.0.9 shipped
+      # without resources/clj-kondo.exports because :src-dirs said ["src"].
+      - 'version.edn'
+      # A human-set VERSION (a minor or major) rides the push, as in hive-agent.
+      - 'VERSION'
+  # A push mints a patch unless VERSION names an untagged version, which is
+  # released as written. A dispatch bumps by its level.
   workflow_dispatch:
+    inputs:
+      level:
+        description: 'Version bump level'
+        required: false
+        default: 'patch'
+        type: choice
+        options: [patch, minor, major]
 
 concurrency:
   group: release-${{ github.ref }}
@@ -30,8 +45,23 @@ jobs:
         with:
           cli: latest
 
-      - name: Bump patch version
-        run: clojure -T:build bump :level :patch
+      # A published pom is immutable, so the suite runs BEFORE anything is
+      # minted. ci.yml covers pull requests; without this step a red push
+      # straight to main would still deploy.
+      - name: Run tests
+        run: clojure -M:test
+
+      - name: Bump version
+        # Pinned release (hive-agent): a VERSION without its tag is a line a
+        # human set, released as written. A tagged VERSION is already out, so
+        # a push mints the next patch; a dispatch bumps by its level.
+        run: |
+          VER=$(tr -d '[:space:]' < VERSION)
+          if [ -z "${{ inputs.level }}" ] && ! git rev-parse -q --verify "refs/tags/v$VER" >/dev/null; then
+            echo "VERSION $VER is untagged: releasing it as written"
+          else
+            clojure -T:build bump :level :${{ inputs.level || 'patch' }}
+          fi
 
       - name: Commit and tag
         run: |
@@ -39,8 +69,9 @@ jobs:
           git config user.name  "hive-ci"
           git config user.email "ci@hive-agi.local"
           git add VERSION
-          # [skip ci] stops this push from retriggering the workflow.
-          git commit -m "chore(release): $VER [skip ci]"
+          # [skip ci] stops this push from retriggering the workflow. A
+          # pinned VERSION has nothing to commit, only a tag to cut.
+          git diff --cached --quiet || git commit -m "chore(release): $VER [skip ci]"
           # Annotated: `git push --follow-tags` ignores lightweight tags,
           # which would publish the artifact and silently drop the tag.
           git tag -a "v$VER" -m "release $VER"

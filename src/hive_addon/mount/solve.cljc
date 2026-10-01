@@ -12,7 +12,29 @@
    lowest-:addon/id lexicographic tie-break, so shuffled input yields an
    identical :ordered. Cycles/missing-deps/unmet-capabilities are diagnosed as
    data. Graceful by default (acyclic subset ordered, cycles reported); opt-in
-   :fail-closed-cycles true returns (r/err :mount/unsolvable ...)."
+   :fail-closed-cycles true returns (r/err :mount/unsolvable ...).
+
+   PORTABLE STRATUM. This namespace is in the require closure of the hot-reload
+   core and must load and BEHAVE IDENTICALLY on the JVM, cljw and cljrs. Three
+   admission rules follow, each mechanically checkable and each derived from a
+   measured divergence rather than from caution:
+
+   - Zero reader conditionals and zero host interop. `:clj` does not select the
+     JVM: cljw presents `:clj` and cljrs presents `:rust`.
+   - No `for`. On cljrs a second binding and `:let` are unbound-symbol errors,
+     and `:when` is SILENTLY IGNORED — in `topo-sort` that would emit a wrong
+     mount order while reporting success. `mapcat`/`keep`/`reduce` say the same
+     thing and are cleared on all three.
+   - No `:or` destructuring default that is not SELF-EVALUATING. cljrs does not
+     evaluate the default, so a symbol default binds the symbol itself; `rules`
+     became the symbol `default-rules`, `edges` folded over a symbol into an
+     EMPTY edge set, and solve returned a lexicographic order reporting no
+     cycles. Literal defaults (`false`, `0`, `:kw`) are unaffected, which is
+     exactly what hides the bug. Use `(or x default)` in the body.
+
+   The three rules are enforced by hive-addon.mount.portable-test, which reads
+   this stratum's source and fails on a violation, and the behaviour is pinned
+   by the tri-runtime differential oracle in test/portable/oracle.cljc."
   (:require [hive-dsl.result :as r]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
@@ -32,23 +54,39 @@
 (defrecord IdDependencyRule []
   IDependencyRule
   (-edges [_ specs]
+    ;; `mapcat`/`keep` rather than a multi-binding `for`: the portable stratum
+    ;; may only name constructs the tri-runtime idiom probe has cleared, and
+    ;; `for` is not one of them (see the ns docstring).
     (let [ids (into #{} (map :addon/id) specs)]
       (into #{}
-            (for [s specs
-                  d (:addon/dependencies s #{})
-                  :when (contains? ids d)]
-              [d (:addon/id s)])))))
+            (mapcat (fn [s]
+                      (let [to (:addon/id s)]
+                        (keep (fn [d] (when (contains? ids d) [d to]))
+                              (:addon/dependencies s #{})))))
+            specs))))
 
 (defrecord CapabilityDependencyRule []
   IDependencyRule
   (-edges [_ specs]
+    ;; One edge per (provider, consumer) PAIR rather than per (consumer,
+    ;; capability, provider) triple. The triple form collapsed to the same set
+    ;; anyway — a provider satisfying two of a consumer's capabilities
+    ;; contributes one edge either way — so `some` over the capabilities is the
+    ;; same relation with one less level of iteration.
     (into #{}
-          (for [s     specs
-                c     (:addon/requires-capabilities s #{})
-                p     specs
-                :when (and (not= (:addon/id p) (:addon/id s))
-                           (contains? (:addon/capabilities p #{}) c))]
-            [(:addon/id p) (:addon/id s)]))))
+          (mapcat (fn [s]
+                    (let [sid  (:addon/id s)
+                          caps (:addon/requires-capabilities s #{})]
+                      (when (seq caps)
+                        (keep (fn [p]
+                                (let [pid (:addon/id p)]
+                                  (when (and (not= pid sid)
+                                             (some (fn [c]
+                                                     (contains? (:addon/capabilities p #{}) c))
+                                                   caps))
+                                    [pid sid])))
+                              specs)))))
+          specs)))
 
 (def default-rules
   "The built-in ordering-rule chain. Order is not significant — `edges` unions
@@ -85,7 +123,10 @@
                          edge-set)]
     (loop [indeg   indeg0
            ordered []]
-      (let [ready (sort (for [[id d] indeg :when (zero? d)] id))]
+      ;; `keep` rather than `for ... :when`: a runtime that drops the :when
+      ;; clause would dequeue a node with non-zero in-degree and emit a WRONG
+      ;; order while reporting success (see the ns docstring).
+      (let [ready (sort (keep (fn [[id d]] (when (zero? d) id)) indeg))]
         (if-let [id (first ready)]
           (recur (reduce (fn [m to] (update m to dec))
                          (dissoc indeg id)
@@ -116,9 +157,16 @@
    Graceful default returns a MountPlan even with cycles. :fail-closed-cycles
    true returns (r/err :mount/unsolvable {:cycles ...}) when cycles exist."
   ([specs] (solve specs {}))
-  ([specs {:keys [rules fail-closed-cycles]
-           :or   {rules default-rules fail-closed-cycles false}}]
-   (let [specs      (set specs)
+  ([specs {:keys [rules fail-closed-cycles]}]
+   ;; `(or rules default-rules)` rather than an `:or` default: on cljrs an :or
+   ;; default is not EVALUATED, so a symbol default binds the symbol itself.
+   ;; `rules` would become the symbol `default-rules`, `edges` would fold over a
+   ;; symbol and yield an EMPTY edge set, and solve would silently return a
+   ;; lexicographic order with no cycles detected. Self-evaluating defaults
+   ;; (`fail-closed-cycles false`) are unaffected, which is what makes the bug
+   ;; invisible until a symbol default is used.
+   (let [rules      (or rules default-rules)
+         specs      (set specs)
          by-id      (into {} (map (juxt :addon/id identity)) specs)
          ids        (set (keys by-id))
          duplicates (into {}
