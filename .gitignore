@@ -1,7 +1,12 @@
 .cpcache/
 .lsp/
-.clj-kondo/.cache/
 target/
 .nrepl-port
 local.deps.edn
-.clj-kondo/
+
+# clj-kondo: track config.edn; ignore the cache and the configs
+# --copy-configs imports from the classpath (they are regenerated).
+.clj-kondo/.cache/
+.clj-kondo/.lock
+.clj-kondo/imports/
+.clj-kondo/inline-configs/

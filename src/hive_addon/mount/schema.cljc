@@ -19,7 +19,9 @@
             [malli.error :as me]
             [malli.registry :as mr]
             [hive-addon.schema :as s]
-            [hive-dsl.result :as r]))
+            [hive-addon.extension :as ext]
+            [hive-dsl.result :as r]
+            [hive-addon.plug.schema :as ps]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -42,6 +44,38 @@
   "The declarative mount manifest value object — a data description of an addon
    to mount (identity, constructor coordinates, deps, capabilities). Reuses
    hive-addon.schema value objects for :addon/id, :addon/type, :addon/capabilities.
+
+   :addon/extension-points is the third capability edge (hive-addon.extension):
+   :addon/capabilities is what this addon OFFERS, :addon/requires-capabilities
+   what it needs a HOST to offer, and :addon/extension-points what it accepts
+   PROVIDERS for. A provider fills a point by declaring the point's
+   :extension/capability in its own :addon/capabilities.
+
+   :addon/trust-class defaults to :foss when absent; :proprietary makes the
+   spec gated, and a gated spec mounts only through a licence gate.
+   :addon/entitlement names the unit a gate checks the licence against.
+
+   :addon/maturity is the how-finished claim every downstream surface renders
+   from: the store badge, `hive addon status`, and any host policy that
+   declines to mount unfinished work. It defaults to :experimental, NOT
+   :stable, so a manifest that never made the claim must not be read as having
+   made the strongest one. It is deliberately not spelled :addon/status, which
+   hive-store already owns for whether the coordinate resolves today.
+
+   :addon/reload-strategy names the hot-reload strategy this addon requires
+   (hive-addon.hot.strategy). Absent means the default chain selects one. It is
+   an open :keyword, never an enum — the strategy set is extensible by any
+   module, and closing it here would be the defect.
+
+   :addon/lifecycle is a hive-addon.lifecycle.schema/LifecycleDecl (:policy
+   :eager|:lazy|:pinned, :idle-ms). :addon/surface is a Surface: the tools and
+   contributed commands a dormant addon is advertised by. The lifecycle ignores
+   a malformed key in either (the host defaults apply, and a lazy addon with no
+   usable surface mounts eagerly) rather than refusing the mount.
+   :addon/runtime lists the client runtimes the addon ships (editor-side code a
+   host provisions after the addon initializes). Each entry is a
+   hive-addon.runtime.schema/RuntimeDecl, validated when provisioned, so a
+   malformed entry is a failed runtime, never a refused mount.
    Open."
   [:map {:closed false}
    [:addon/id s/AddonId]
@@ -49,15 +83,23 @@
    [:addon/init-ns [:string {:min 1}]]
    [:addon/init-fn [:string {:min 1}]]
    [:addon/kind {:optional true} [:enum :addon :library]]
+   [:addon/maturity {:optional true :default :experimental} s/Maturity]
    [:addon/version {:optional true} [:string {:min 1}]]
    [:addon/config {:optional true :default {}} [:map-of :keyword :any]]
    [:addon/capabilities {:optional true :default #{}} s/CapabilitySet]
    [:addon/dependencies {:optional true :default #{}} [:set s/AddonId]]
    [:addon/requires-capabilities {:optional true :default #{}} [:set :keyword]]
+   [:addon/extension-points {:optional true :default []} ext/ExtensionPoints]
    [:addon/init-retry {:optional true} InitRetryPolicy]
+   [:addon/reload-strategy {:optional true} :keyword]
+   [:addon/lifecycle {:optional true} [:map-of :keyword :any]]
+   [:addon/surface {:optional true} [:map-of :keyword :any]]
+   [:addon/runtime {:optional true} [:vector {:max 4} [:map {:closed false}]]]
    [:addon/description {:optional true} [:maybe :string]]
    [:addon/author {:optional true} [:maybe :string]]
-   [:addon/license {:optional true} [:maybe :string]]])
+   [:addon/license {:optional true} [:maybe :string]]
+   [:addon/trust-class {:optional true :default :foss} ps/TrustClass]
+   [:addon/entitlement {:optional true} [:maybe [:string {:min 1}]]]])
 
 (def MountPlan
   "Pure output of solve — the ordered mount plan plus diagnostics as data. No
@@ -72,16 +114,37 @@
    [:unmet-capabilities [:map-of s/AddonId [:set :keyword]]]
    [:duplicates [:map-of s/AddonId :int]]])
 
+(def SolveArgs
+  "Arglist of hive-addon.mount.solve/solve in its single-arity form: just the
+   spec set. A :cat schema, so a schema-driven test APPLIES the subject rather
+   than handing it the vector as one argument.
+
+   The options map is deliberately not modelled here. Its two keys select
+   behaviour (a custom rule chain, fail-closed cycles) rather than describe a
+   value, and a generated `:rules` would be a generated rule chain — which is a
+   different subject under test, not a wider sample of this one."
+  [:cat [:sequential MountSpec]])
+
 (def MountResult
   "Per-addon mount outcome. :phase records how far the addon got; :success?
-   whether that addon mounted; :errors the accumulated failure strings. Open."
+   whether that addon mounted; :errors the accumulated failure strings.
+
+   :entitlement is the earliest phase: a refused spec never has its constructor
+   namespace loaded. Open."
   [:map {:closed false}
    [:addon/id s/AddonId]
    [:success? :boolean]
-   [:phase [:enum :config :resolved :registered :initialized :skipped :failed]]
+   [:phase [:enum :entitlement :config :resolved :registered :initialized :skipped :failed]]
    [:errors {:optional true} [:sequential :string]]
+   [:deny/reason {:optional true} :keyword]
    [:init-attempts {:optional true} [:int {:min 1}]]
-   [:already-initialized? {:optional true} :boolean]])
+   [:already-initialized? {:optional true} :boolean]
+   [:constructor/status {:optional true} [:enum :resolved :absent :failed :invalid]]
+   [:constructor/symbol {:optional true} :string]
+   [:constructor/error {:optional true} :string]
+   [:constructor/exception {:optional true} :string]
+   [:constructor/cause {:optional true} :string]
+   [:constructor/cause-message {:optional true} :string]])
 
 (def MountReport
   "Aggregate outcome of mounting a plan. :ok? is true only when every attempted
@@ -110,16 +173,18 @@
   {:mount/init-retry-policy InitRetryPolicy
    :mount/spec            MountSpec
    :mount/plan            MountPlan
+   :mount/solve-args      SolveArgs
    :mount/result          MountResult
    :mount/report          MountReport
    :mount/teardown-report TeardownReport})
 
 (def registry
-  "Composite malli registry: hive-addon.schema's registry (malli defaults +
-   :addon/* schemas) plus this ns's :mount/* schemas. NOT installed as the
-   global default — reach it via the wrappers below or {:registry registry}."
+  "Composite malli registry: hive-addon.extension's registry (malli defaults +
+   :addon/* + :extension/* schemas) plus this ns's :mount/* schemas. NOT
+   installed as the global default: reach it via the wrappers below or
+   {:registry registry}."
   (mr/composite-registry
-   s/registry
+   ext/registry
    (mr/registry mount-schemas)))
 
 (defn schema

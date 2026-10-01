@@ -21,7 +21,8 @@
             [malli.error :as me]
             [malli.registry :as mr]
             [hive-addon.protocol :as proto]
-            [hive-dsl.result :as r]))
+            [hive-dsl.result :as r]
+            [hive-dsl.adt :as adt]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -39,6 +40,39 @@
   "The addon's execution type. Derived from proto/valid-addon-types so the
    enum can never drift from the protocol's own constant."
   (into [:enum] proto/valid-addon-types))
+
+(adt/defadt AddonMaturity
+  "Where an addon sits on the road to maturity, as a CLOSED sum type.
+
+   Closed because every value is rendered somewhere (store badge, mount
+   policy, `hive addon status`), so gaining one is a product decision, not an
+   extension point. Cardinality decides the construct: an open set would be a
+   multimethod, this is an ADT.
+
+   :stable       released, supported, safe to depend on
+   :beta         active development toward maturity; the surface may still move
+   :experimental proving a capability; may change shape or vanish
+   :dormant      not under development and not recommended; kept for archaeology"
+  :dormant
+  :experimental
+  :beta
+  :stable)
+
+(def Maturity
+  "The `:addon/maturity` manifest field: a BARE variant keyword, because a
+   manifest author writes `:addon/maturity :beta` and not an ADT value map.
+
+   Derived from AddonMaturity's variant set, so the wire enum cannot drift
+   from the type, exactly as AddonType derives from proto/valid-addon-types.
+
+   NOT `:addon/status`. hive-store already owns that key for a different
+   claim: whether a customer's token resolves the coordinate today
+   (:available / :preview). Maturity is about how finished the code is, and
+   the two answers disagree often enough that sharing a key would be a bug.
+
+   Absence defaults to :experimental at the MountSpec, never to :stable: an
+   undeclared addon must not inherit a claim it never made."
+  (into [:enum] (sort (:variants AddonMaturity))))
 
 (def Capability
   "A single capability keyword. OPEN: the standard set plus custom addon
@@ -70,15 +104,18 @@
 
 (def ToolDef
   "A single MCP tool definition contributed by (tools addon). :inputSchema is
-   the JSON-schema-ish map the host forwards; :handler is an arbitrary fn. Open
-   — some addons carry extra keys. Only :name is required: :handler/:inputSchema
-   are OPTIONAL BY DESIGN because a :mcp-bridge/:external addon's executable
-   handler is supplied by the host transport, not the tool-def."
+   the JSON-schema-ish map the host forwards; :handler is anything invokable —
+   a fn OR a Var, so a dispatch entry can resolve through the var at call time
+   instead of capturing the fn at wiring time (the same `ifn?` the registry's
+   own precondition accepts). Open — some addons carry extra keys. Only :name
+   is required: :handler/:inputSchema are OPTIONAL BY DESIGN because a
+   :mcp-bridge/:external addon's executable handler is supplied by the host
+   transport, not the tool-def."
   [:map {:closed false}
    [:name [:string {:min 1}]]
    [:description {:optional true} :string]
    [:inputSchema {:optional true} [:map {:closed false}]]
-   [:handler {:optional true} fn?]])
+   [:handler {:optional true} ifn?]])
 
 (def Tools
   "Return shape of (tools addon): a sequence of tool-defs (may be empty)."
@@ -120,6 +157,7 @@
    can reference addon shapes by keyword (:addon/health, :addon/tools, ...)."
   {:addon/id                AddonId
    :addon/type              AddonType
+   :addon/maturity          Maturity
    :addon/capability        Capability
    :addon/capabilities      CapabilitySet
    :addon/health-status     HealthStatus
@@ -198,25 +236,34 @@
    omit them, defaulting to #{}/{}); an unimplemented optional method is
    skipped, an unimplemented required method is a violation. Non-implementation
    is recognized for BOTH extension mechanisms: inline deftype/defrecord/reify
-   omission (AbstractMethodError) and extend-*/metadata omission
-   (IllegalArgumentException \"No implementation of method\")."
+   omission and extend-*/metadata omission.
+
+   Detection is by MESSAGE, not by exception class. The class differs per host
+   and naming one is not portable — `AbstractMethodError` does not exist off the
+   JVM, and `#?(:clj ...)` does not select the JVM (cljw presents :clj), so the
+   old class-based branch was TAKEN on cljw and died at analysis. Measured
+   messages for a missing protocol method:
+
+     JVM   \"Method p.Partial.b()Ljava/lang/Object; is abstract\"
+     cljw  \"No implementation of method 'b' on protocol 'IThing' for type ...\"
+     cljrs \"runtime error: No implementation of protocol IThing for type ...\"
+
+   `ex-message` reads all of them (it is defined on Throwable on the JVM), so
+   the whole check is host-free."
   [addon]
-  (letfn [(unimplemented? [t]
-            ;; NOTE (JVM): an AbstractMethodError raised from *inside* an
-            ;; implemented method body also reads as unimplemented here — an
-            ;; accepted edge for the optional-method skip.
-            #?(:clj (or (instance? AbstractMethodError t)
-                        (and (instance? IllegalArgumentException t)
-                             (some? (some->> (.getMessage ^Throwable t)
-                                             (re-find #"No implementation of method")))))
-               :cljs (boolean (some->> (ex-message t)
-                                       (re-find #"(?i)no protocol method|nothing implements")))))
-          (err-msg [t] #?(:clj (.getMessage ^Throwable t) :cljs (ex-message t)))]
+  ;; Non-implementation detection lives on hive-addon.protocol, beside the
+  ;; protocol whose optional methods it is about, so this audit and
+  ;; hive-addon.opaque.serve share ONE definition of it. serve cannot reach
+  ;; here: it is malli-free, so a cljw-built kernel carries no schema runtime.
+  (letfn [(err-msg [t] (ex-message t))]
     (reduce
      (fn [_acc [k getter sch optional?]]
        (let [call (try {:v (getter addon)}
-                       (catch #?(:clj Throwable :cljs :default) t
-                         (if (unimplemented? t) ::unimplemented {:throw t})))]
+                       ;; TOTAL reader conditional — :clj for the JVM and cljw
+                       ;; (both have Throwable), :default for cljs and cljrs. A
+                       ;; non-total #? would vanish on cljrs and stop catching.
+                       (catch #?(:clj Throwable :default :default) t
+                         (if (proto/unimplemented-method? t) ::unimplemented {:throw t})))]
          (cond
            (and optional? (= call ::unimplemented)) (r/ok addon)
            (= call ::unimplemented)

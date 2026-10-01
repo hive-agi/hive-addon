@@ -1,0 +1,143 @@
+name: ci
+
+# Two gates. `test` is the JVM suite and runs on every push; `oracle` is the
+# tri-runtime differential and is the reason this file exists — the portable
+# stratum's whole claim is that JVM, ClojureWasm and clojurust agree line for
+# line, and that claim is only worth what an unattended run says about it.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: jvm suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeLaGuardo/setup-clojure@13.0
+        with:
+          cli: latest
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.gitlibs
+          key: cljdeps-${{ hashFiles('deps.edn') }}
+          restore-keys: cljdeps-
+
+      - run: clojure -M:test
+
+  oracle:
+    name: tri-runtime oracle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # hive-dsl is a Maven dep for the JVM, but cljw resolves only :git/url and
+      # :local/root, so every host is fed SOURCE. The tag is read out of deps.edn
+      # rather than written here twice: the JVM leg would otherwise run one
+      # hive-dsl and the wasm/rust legs another, and the diff would be reported
+      # as a portability defect.
+      - id: dsl
+        run: |
+          VER=$(grep -oP 'io\.github\.hive-agi/hive-dsl \{:mvn/version "\K[^"]+' deps.edn)
+          [ -n "$VER" ] || { echo "could not read the hive-dsl version out of deps.edn"; exit 1; }
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "hive-dsl pinned to v$VER (from deps.edn)"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: hive-agi/hive-dsl
+          ref: v${{ steps.dsl.outputs.version }}
+          path: hive-dsl
+
+      # malli as SOURCE for the schema leg, at the SAME version run.sh hands the
+      # JVM leg — read OUT of run.sh rather than restated here, so the two legs
+      # cannot drift into comparing different mallis and calling it a port bug.
+      # dynaload is malli's own dependency, read from malli's deps.edn likewise.
+      - id: malli
+        run: |
+          VER=$(grep -oP 'metosin/malli \{:mvn/version \\"\K[^\\"]+' test/portable/run.sh)
+          [ -n "$VER" ] || { echo "could not read the malli version out of test/portable/run.sh"; exit 1; }
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "malli pinned to $VER (from run.sh)"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: metosin/malli
+          ref: ${{ steps.malli.outputs.version }}
+          path: malli
+
+      - id: dynaload
+        run: |
+          VER=$(grep -oP 'borkdude/dynaload \{:mvn/version "\K[^"]+' malli/deps.edn)
+          [ -n "$VER" ] || { echo "could not read the dynaload version out of malli/deps.edn"; exit 1; }
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: borkdude/dynaload
+          ref: v${{ steps.dynaload.outputs.version }}
+          path: dynaload
+
+      - uses: DeLaGuardo/setup-clojure@13.0
+        with:
+          cli: latest
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.gitlibs
+          key: cljdeps-${{ hashFiles('deps.edn') }}
+          restore-keys: cljdeps-
+
+      # Latest release, NOT a pinned tag: run.sh asserts a floor (CLJW_MIN), so
+      # tracking upstream is safe and a regression below the floor fails loudly.
+      # Pinning here instead would reintroduce exactly the stale-binary trap the
+      # floor exists to catch.
+      - name: Install cljw
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          gh release download --repo BuddhiLW/ClojureWasm \
+            --pattern 'cljw-linux-x86_64.tar.gz' --output /tmp/cljw.tar.gz --clobber
+          tar -xzf /tmp/cljw.tar.gz -C "$HOME/.local/bin"
+          chmod +x "$HOME/.local/bin/cljw"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: BuddhiLW/clojurust
+          path: clojurust
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: clojurust
+
+      - name: Build cljrs
+        working-directory: clojurust
+        run: cargo build --release --bin cljrs
+
+      # REQUIRE_HOSTS=1 is the whole point of running this unattended: without it
+      # a host whose binary failed to materialize prints SKIP, and a green log
+      # containing SKIP reads exactly like a green log that proved something.
+      - name: Tri-runtime differential oracle
+        env:
+          REQUIRE_HOSTS: '1'
+          HIVE_DSL_SRC: ${{ github.workspace }}/hive-dsl/src
+          CLJRS: ${{ github.workspace }}/clojurust/target/release/cljrs
+          MALLI_SRC: ${{ github.workspace }}/malli/src
+          DYNALOAD_SRC: ${{ github.workspace }}/dynaload/src
+        run: ./test/portable/run.sh

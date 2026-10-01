@@ -1,0 +1,8 @@
+{:all-three
+ [{:rule :literal-secret, :credential "h"}
+  {:rule :literal-secret, :lib org.acme/a}
+  {:rule :literal-secret, :repo "r"}],
+ :clean [],
+ :cred-secret [{:rule :literal-secret, :credential "h"}],
+ :plug-secret [{:rule :literal-secret, :lib org.acme/a}],
+ :repo-secret [{:rule :literal-secret, :repo "r"}]}

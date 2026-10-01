@@ -3,4 +3,4 @@
  :description "Standalone IAddon contract (kernel + capability/lifecycle/health) as a leaf lib. Any host — hive-mcp or an unrelated project — depends on this to DIP-load addons, instead of compile-depending on hive-mcp. Deps: clojure + hive-dsl only. cljc."
  :language :clojure
  :tags ["hive-addon" "iaddon" "contract" "leaf-lib" "dip" "plugin"]
- :carto {:source-roots ["src" "test"]}}
+ :carto {:source-roots ["resources" "src" "test"]}}
