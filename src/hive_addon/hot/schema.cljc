@@ -8,11 +8,16 @@
    `schema`/`validate`/`explain`/`validate*` or by passing {:registry registry}.
 
    Hot shapes are registered under :hot/* keys (:hot/registration, :hot/report,
-   :hot/remount-report, :hot/source, :hot/strategy-id).
+   :hot/remount-report, :hot/inject-report, :hot/eject-report, :hot/source,
+   :hot/strategy-id, :hot/remount-outcome).
 
    Two invariants are carried as DATA rather than prose:
-   - RemountReport's :teardown/data-preserved? is [:= true] — the no-nuke
-     invariant inherited from TeardownReport.
+   - The reports' :teardown/data-preserved? is a :boolean VERDICT computed by
+     hive-addon.hot.report/data-preserved? over the teardowns that actually
+     released something — never true by construction. (The per-teardown
+     TeardownReport in hive-addon.mount.schema still pins [:= true]: that is
+     the no-nuke claim a teardown makes; the report verdict is whether every
+     release made it.)
    - :hot/strategy-id is an open :keyword, never an enum. The strategy set is
      extensible by any module (OCP); closing it here would be the defect."
   (:require [malli.core :as m]
@@ -116,8 +121,16 @@
    var provably did not change — both are the \"reloaded, but the code did not\"
    shape, and the second REFUSES the remount.
 
-   :hot/strategy names the strategy that ran. :teardown/data-preserved? inherits
-   the no-nuke invariant: [:= true]. Open."
+   What is RUNNING afterwards is stated, not left to inference:
+   :hot/refused? true means the remount was declined before any teardown
+   (:hot/preflight carries the dry-run results that refused it); :hot/restored
+   are ids whose new instance failed and whose PREVIOUS instance is live again;
+   :hot/down are ids with neither. :hot/restored? is present only when
+   something failed, true exactly when nothing is down.
+
+   :hot/strategy names the strategy that ran. :teardown/data-preserved? is a
+   COMPUTED verdict (hive-addon.hot.report/data-preserved?) over the teardowns
+   that released something — no longer true by construction. Open."
   [:map {:closed false}
    [:hot/trigger HotTrigger]
    [:hot/strategy StrategyId]
@@ -134,7 +147,12 @@
    [:hot/multi-file {:optional true} [:map-of :string [:sequential :string]]]
    [:hot/stale-ctors {:optional true} [:sequential :string]]
    [:hot/widened {:optional true} [:set s/AddonId]]
-   [:teardown/data-preserved? [:= true]]
+   [:hot/refused? {:optional true} :boolean]
+   [:hot/preflight {:optional true} [:sequential ms/MountResult]]
+   [:hot/restored {:optional true} [:sequential s/AddonId]]
+   [:hot/down {:optional true} [:sequential s/AddonId]]
+   [:hot/restored? {:optional true} :boolean]
+   [:teardown/data-preserved? :boolean]
    [:mounted [:sequential ms/MountResult]]
    [:ok? :boolean]
    [:errors {:optional true} [:sequential :string]]])
@@ -153,8 +171,11 @@
    :hot/torn-down). :mounted carries the per-addon MountResult from the
    ordinary mount pipeline. :hot/dirs-added are the source dirs handed to
    hive-hot so the new addons reload like the rest; :hot/registered the ids
-   registered as hive-hot components. :teardown/data-preserved? inherits the
-   no-nuke invariant: [:= true]. Open."
+   registered as hive-hot components. :hot/remembered are the ids recorded in
+   the injected-spec registry (so discovery from ANY thread sees them), and
+   :hot/adopted the ids the installed lifecycle manager now governs under
+   their manifest policy. :teardown/data-preserved? is computed over the
+   dependent teardown that ran. Open."
   [:map {:closed false}
    [:hot/path :string]
    [:hot/paths [:sequential :string]]
@@ -169,10 +190,63 @@
    [:hot/missing {:optional true} [:map-of :any :any]]
    [:hot/dirs-added [:sequential :string]]
    [:hot/registered [:sequential s/AddonId]]
+   [:hot/remembered {:optional true} [:sequential s/AddonId]]
+   [:hot/adopted {:optional true} [:sequential s/AddonId]]
    [:hot/deps {:optional true} [:map {:closed false} [:ok? :boolean]]]
-   [:teardown/data-preserved? [:= true]]
+   [:teardown/data-preserved? :boolean]
    [:mounted [:sequential ms/MountResult]]
    [:discovery-errors {:optional true} [:sequential :any]]
+   [:ok? :boolean]
+   [:errors {:optional true} [:sequential :string]]])
+
+(def EjectReport
+  "Outcome of plugging addons OUT of a running host
+   (hive-addon.hot.inject/eject!) — what was removed, and what STAYS.
+
+   Removed: :hot/torn-down (shut down, reverse order), :hot/unregistered
+   (dropped from the host registry through IMountUnregister), :hot/ungoverned
+   (no longer governed by the installed lifecycle manager), :hot/unhot
+   (deregistered from hive-hot), :hot/dirs-removed (no longer watched),
+   :hot/forgotten (dropped from the injected-spec registry).
+
+   Stays — reported, because a caller must not assume it went:
+   :hot/unsupported  ids whose host has no IMountUnregister and still holds an
+                     inert, shut-down entry.
+   :hot/dirs-retained  source dirs still watched: shared with a surviving addon,
+                     a core dir hive-hot's initial init declared, one another
+                     owner still claims (then under :hot/dirs-shared {dir
+                     [owner]}), or hive-hot offers no remove-dirs! (see
+                     :hot/dirs-reason).
+   :hot/classpath-retained  URLs that stay on the DynamicClassLoader. A
+                     java.net.URLClassLoader cannot drop a URL; the code stays
+                     loadable until the JVM restarts.
+   :hot/namespaces-retained  constructor namespaces still loaded in the image.
+
+   :hot/refused? with :hot/blocking lists active dependents that stopped the
+   ejection (pass :cascade? true to take them down and remount them without
+   the ejected sibling; they are then under :hot/remounted and :mounted).
+   :teardown/data-preserved? is computed over the teardowns that ran. Open."
+  [:map {:closed false}
+   [:hot/target :any]
+   [:hot/ejected [:sequential s/AddonId]]
+   [:hot/unknown {:optional true} [:sequential :any]]
+   [:hot/refused? {:optional true} :boolean]
+   [:hot/blocking {:optional true} [:sequential s/AddonId]]
+   [:hot/torn-down [:sequential s/AddonId]]
+   [:hot/unregistered [:sequential s/AddonId]]
+   [:hot/unsupported [:sequential s/AddonId]]
+   [:hot/ungoverned [:sequential s/AddonId]]
+   [:hot/unhot [:sequential s/AddonId]]
+   [:hot/forgotten [:sequential s/AddonId]]
+   [:hot/dirs-removed [:sequential :string]]
+   [:hot/dirs-retained [:sequential :string]]
+   [:hot/dirs-reason {:optional true} :string]
+   [:hot/dirs-shared {:optional true} [:map-of :string [:sequential :any]]]
+   [:hot/classpath-retained [:sequential :string]]
+   [:hot/namespaces-retained [:sequential :string]]
+   [:hot/remounted {:optional true} [:sequential s/AddonId]]
+   [:mounted {:optional true} [:sequential ms/MountResult]]
+   [:teardown/data-preserved? :boolean]
    [:ok? :boolean]
    [:errors {:optional true} [:sequential :string]]])
 
@@ -218,6 +292,20 @@
 ;; Local composite registry — mount.schema registry + :hot/* schemas
 ;; =============================================================================
 
+(def RemountOutcomeArgs
+  "Arglist of hive-addon.hot.report/remount-outcome: the ids a remount tore
+   down, then the MountReport that followed."
+  [:cat [:sequential s/AddonId] ms/MountReport])
+
+(def RemountOutcome
+  "What hive-addon.hot.report/remount-outcome answers: which torn-down ids are
+   back on their PREVIOUS instance, which are down, and — only when something
+   failed — whether everything is running again."
+  [:map {:closed true}
+   [:hot/restored [:sequential s/AddonId]]
+   [:hot/down [:sequential s/AddonId]]
+   [:hot/restored? {:optional true} :boolean]])
+
 (def ^:private hot-schemas
   "Static :hot/* -> schema map seeded into the local registry."
   {:hot/trigger            HotTrigger
@@ -228,11 +316,13 @@
    :hot/report             HotReport
    :hot/remount-report     RemountReport
    :hot/inject-report      InjectReport
+   :hot/eject-report       EjectReport
    :hot/addon-id-set       AddonIdSet
    :hot/specs              MountSpecs
    :hot/dependents-args    DependentsArgs
    :hot/teardown-outcome   TeardownOutcome
-   :hot/ns-reload-outcome  NsReloadOutcome})
+   :hot/ns-reload-outcome  NsReloadOutcome
+   :hot/remount-outcome    RemountOutcome})
 
 (def registry
   "Composite malli registry: hive-addon.mount.schema's registry (malli defaults +
