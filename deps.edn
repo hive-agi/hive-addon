@@ -7,7 +7,7 @@
 
         ;; malli — schema layer for the IAddon contract (self-contained; no hive-spi).
         ;; The addon bounded context owns its own schemas (DDD). House pin: 0.20.1.
-        metosin/malli {:mvn/version "0.20.1"}
+        metosin/malli {:mvn/version "0.20.2"}
         io.github.hive-agi/hive-help {:mvn/version "0.1.5"}}
 
  ;; hive-hot is deliberately NOT in :deps. hive-addon.hot resolves it through the
