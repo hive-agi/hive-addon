@@ -320,18 +320,30 @@
         [(str target)]))))
 
 (defn- hot-remove-dirs!
-  "Hand DIRS to hive-hot's `remove-dirs!`, resolved at call time. hive-hot
-   releases before 0.1.20 have no such entry point; the dirs then stay watched
-   and the answer says why. {:removed [..] :retained [..] :reason string?}"
+  "Hand DIRS to hive-hot's `remove-dirs!` ({:dirs [..]} -> {:removed [..]
+   :kept [..] :absent [..] :dirs [..]}), resolved at call time. A dir hive-hot
+   KEEPS (one its initial init declared) is retained; a dir it was not tracking
+   was never watched and is neither. hive-hot releases without remove-dirs! leave
+   every dir watched and the answer says why.
+   {:removed [..] :retained [..] :reason string?}"
   [dirs]
   (cond
     (empty? dirs) {:removed [] :retained []}
     :else
     (if-let [remove! (r/rescue nil (requiring-resolve 'hive-hot.core/remove-dirs!))]
-      (let [res (r/try-effect (remove! {:dirs (vec dirs)}))]
-        (if (r/err? res)
+      (let [res (r/try-effect (remove! {:dirs (vec dirs)}))
+            out (:ok res)]
+        (cond
+          (r/err? res)
           {:removed [] :retained (vec dirs) :reason (str "hive-hot remove-dirs! failed: " (:message res))}
-          {:removed (vec (or (:removed (:ok res)) dirs)) :retained []}))
+
+          (not (map? out))
+          {:removed [] :retained (vec dirs) :reason "hive-hot remove-dirs! answered no report"}
+
+          :else
+          (cond-> {:removed (vec (:removed out)) :retained (vec (:kept out))}
+            (seq (:kept out))
+            (assoc :reason "hive-hot keeps the dirs its initial init declared"))))
       {:removed [] :retained (vec dirs)
        :reason (if (hot/available?)
                  "hive-hot has no remove-dirs! — the dirs stay watched until hive-hot is re-initialized"

@@ -272,3 +272,39 @@
     (is (false? (:ok? report)))
     (is (= ["probe.nope"] (:hot/unknown report)))
     (is (seq (:errors report)))))
+
+;; =============================================================================
+;; Released dirs go through hive-hot's remove-dirs!, resolved at call time
+;; =============================================================================
+
+(deftest released-dirs-are-handed-to-hive-hot-remove-dirs-or-retained-with-a-reason
+  (let [hot-remove! #'inject/hot-remove-dirs!
+        tmp         (fn [tag] (doto (io/file (System/getProperty "java.io.tmpdir")
+                                             (str "hive-addon-dirs-" tag "-" (System/nanoTime)))
+                                .mkdirs))
+        core        (tmp "core")
+        plugged     (tmp "plugged")
+        [c p]       [(str core) (str plugged)]]
+    (try
+      (if-let [remove-dirs! (try (requiring-resolve 'hive-hot.core/remove-dirs!)
+                                 (catch Throwable _hive-hot-absent-means-degraded-path nil))]
+        (let [init!   (requiring-resolve 'hive-hot.core/init!)
+              extend! (requiring-resolve 'hive-hot.core/extend-init!)
+              reset!* (requiring-resolve 'hive-hot.core/reset-all!)]
+          (try
+            (init! {:dirs [c]})
+            (extend! {:dirs [p]})
+            (testing "a plugged-in root is removed; a core root is retained, with the reason"
+              (let [out (hot-remove! [p c])]
+                (is (= [p] (:removed out)))
+                (is (= [c] (:retained out)))
+                (is (string? (:reason out)))))
+            (testing "the signature eject! calls is the one hive-hot answers"
+              (is (= {:removed [] :kept [] :absent [p] :dirs [c]} (remove-dirs! {:dirs [p]}))))
+            (finally (reset!*))))
+        (testing "a hive-hot without remove-dirs! retains every dir and says why"
+          (let [out (hot-remove! [p])]
+            (is (= [] (:removed out)))
+            (is (= [p] (:retained out)))
+            (is (string? (:reason out))))))
+      (finally (delete-tree! core) (delete-tree! plugged)))))
