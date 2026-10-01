@@ -10,7 +10,10 @@
    lifecycle host is the library's own ILifecycleHost over the same port."
   (:require [clojure.java.io :as io]
             [clojure.test :refer [deftest is testing use-fixtures]]
+            [hive-addon.hot.dirs :as dirs]
             [hive-addon.hot.inject :as inject]
+            [hive-addon.hot.port :as hport]
+            [hive-addon.hot.report :as verdict]
             [hive-addon.hot.schema :as hs]
             [hive-addon.hot.source :as source]
             [hive-addon.hot-fixture :as fx]
@@ -21,7 +24,8 @@
             [hive-addon.mount.boundary :as boundary]
             [hive-addon.mount.injected :as injected]
             [hive-addon.mount.port :as port]
-            [hive-addon.protocol :as proto])
+            [hive-addon.protocol :as proto]
+            [hive-dsl.result :as r])
   (:import [clojure.lang DynamicClassLoader]
            [java.io File]))
 
@@ -274,37 +278,130 @@
     (is (seq (:errors report)))))
 
 ;; =============================================================================
-;; Released dirs go through hive-hot's remove-dirs!, resolved at call time
+;; Released dirs go through the IHotDirs port — stubbed here, real below
 ;; =============================================================================
 
-(deftest released-dirs-are-handed-to-hive-hot-remove-dirs-or-retained-with-a-reason
-  (let [hot-remove! #'inject/hot-remove-dirs!
-        tmp         (fn [tag] (doto (io/file (System/getProperty "java.io.tmpdir")
-                                             (str "hive-addon-dirs-" tag "-" (System/nanoTime)))
-                                .mkdirs))
-        core        (tmp "core")
-        plugged     (tmp "plugged")
-        [c p]       [(str core) (str plugged)]]
+(defn- recording-dirs
+  "An IHotDirs stub answering REMOVE (fn [req] -> Result) and recording every
+   request. Reify'd per test, through the port."
+  [remove]
+  (let [calls (atom [])]
+    {:calls calls
+     :port  (reify hport/IHotDirs
+              (-extend-dirs! [_ req] (swap! calls conj [:extend req])
+                (r/ok {:dirs (:dirs req) :added (:dirs req)}))
+              (-remove-dirs! [_ req] (swap! calls conj [:remove req])
+                (remove req)))}))
+
+(deftest eject-releases-each-owners-claim-through-the-port
+  (let [host   (mount-into! (recording-host) [spec-a])
+        dirs   (vec (source/watchable-dirs [spec-a]))
+        {:keys [calls port]}
+        (recording-dirs (fn [{ds :dirs}]
+                          (r/ok {:removed [] :kept (vec ds) :absent [] :dirs (vec ds)
+                                 :shared (into {} (map (fn [d] [d ["other.owner"]])) ds)})))
+        report (inject/eject! host [spec-a] "probe.a" {:hot-dirs port})]
+    (is (:ok? report) (pr-str (:errors report)))
+    (when (seq dirs)
+      (testing "one request per ejected owner, naming the owner"
+        (is (= [[:remove {:dirs dirs :owner "probe.a"}]] @calls)))
+      (testing "a dir another owner claims stays, and the report says who"
+        (is (= [] (:hot/dirs-removed report)))
+        (is (= (vec (sort dirs)) (:hot/dirs-retained report)))
+        (is (= (into {} (map (fn [d] [d ["other.owner"]])) dirs) (:hot/dirs-shared report)))
+        (is (re-find #"another owner" (:hot/dirs-reason report)))))
+    (is (nil? (hs/humanize-errors hs/EjectReport report))
+        (pr-str (hs/humanize-errors hs/EjectReport report)))))
+
+(deftest eject-reports-a-dirs-port-failure-as-retained-with-the-reason
+  (let [host   (mount-into! (recording-host) [spec-a])
+        dirs   (vec (source/watchable-dirs [spec-a]))
+        {:keys [port]} (recording-dirs (fn [_] (r/err :hot/dirs-unavailable {:message "no hive-hot"})))
+        report (inject/eject! host [spec-a] "probe.a" {:hot-dirs port})]
+    (is (:ok? report) "the addon is out; only the watch stays")
+    (when (seq dirs)
+      (is (= (vec (sort dirs)) (:hot/dirs-retained report)))
+      (is (= "no hive-hot" (:hot/dirs-reason report))))))
+
+(deftest dirs-outcome-reads-the-remove-dirs-report-contract
+  (testing "removed by one owner wins over kept by another request"
+    (is (= {:removed ["/x"] :retained [] :shared {}}
+           (verdict/dirs-outcome [{:dirs ["/x"] :owner "a"} {:dirs ["/x"] :owner "b"}]
+                                 [(r/ok {:removed [] :kept ["/x"] :absent [] :dirs ["/x"] :shared {"/x" ["b"]}})
+                                  (r/ok {:removed ["/x"] :kept [] :absent [] :dirs [] :shared {}})]))))
+  (testing "a core dir is retained with the core reason; absent is neither"
+    (let [out (verdict/dirs-outcome [{:dirs ["/core" "/gone"] :owner "a"}]
+                                    [(r/ok {:removed [] :kept ["/core"] :absent ["/gone"] :dirs ["/core"] :shared {}})])]
+      (is (= [] (:removed out)))
+      (is (= ["/core"] (:retained out)))
+      (is (re-find #"initial init" (:reason out)))))
+  (testing "an err answer retains every dir of its request"
+    (is (= {:removed [] :retained ["/y"] :shared {} :reason "boom"}
+           (verdict/dirs-outcome [{:dirs ["/y"] :owner "a"}] [(r/err :x {:message "boom"})])))))
+
+;; =============================================================================
+;; plug-out! — unsafe ejects refused loudly, as Result errors
+;; =============================================================================
+
+(deftest plug-out-refuses-an-unsafe-eject-as-an-err-result
+  (let [host (mount-into! (recording-host) [spec-a spec-b])
+        stub (:port (recording-dirs (fn [_] (r/ok {:removed [] :kept [] :absent [] :dirs [] :shared {}}))))
+        res  (inject/plug-out! host [spec-a spec-b] "probe.a" {:hot-dirs stub})]
+    (is (r/err? res))
+    (is (= :hot/eject-refused (:error res)))
+    (is (= ["probe.b"] (:hot/blocking res)))
+    (is (string? (:message res)))
+    (is (empty? (calls-of host :shutdown!)) "a refusal touches nothing"))
+  (testing "unknown target"
+    (let [res (inject/plug-out! (mount/atom-mount-host) [] "probe.nope" {})]
+      (is (= :hot/eject-unknown (:error res)))))
+  (testing "a safe eject is ok, with the report"
+    (let [host (mount-into! (recording-host) [spec-a])
+          stub (:port (recording-dirs (fn [{ds :dirs}] (r/ok {:removed (vec ds) :kept [] :absent [] :dirs [] :shared {}}))))
+          res  (inject/plug-out! host [spec-a] "probe.a" {:hot-dirs stub})]
+      (is (r/ok? res))
+      (is (= ["probe.a"] (:hot/ejected (:ok res))))
+      (is (true? (:teardown/data-preserved? (:ok res)))))))
+
+;; =============================================================================
+;; The adapter against the real hive-hot — the report contract, owner claims
+;; =============================================================================
+
+(deftest the-hive-hot-adapter-answers-the-remove-dirs-report-contract
+  (let [tmp     (fn [tag] (doto (io/file (System/getProperty "java.io.tmpdir")
+                                         (str "hive-addon-dirs-" tag "-" (System/nanoTime)))
+                            .mkdirs))
+        core    (tmp "core")
+        plugged (tmp "plugged")
+        [c p]   [(str core) (str plugged)]
+        port    (dirs/hot-dirs)]
     (try
-      (if-let [remove-dirs! (try (requiring-resolve 'hive-hot.core/remove-dirs!)
-                                 (catch Throwable _hive-hot-absent-means-degraded-path nil))]
+      (if (try (requiring-resolve 'hive-hot.core/remove-dirs!)
+               (catch Throwable _hive-hot-absent-means-degraded-path nil))
         (let [init!   (requiring-resolve 'hive-hot.core/init!)
-              extend! (requiring-resolve 'hive-hot.core/extend-init!)
-              reset!* (requiring-resolve 'hive-hot.core/reset-all!)]
+              reset!* (requiring-resolve 'hive-hot.core/reset-all!)
+              Report  @(requiring-resolve 'hive-hot.schema/RemoveDirsReport)
+              valid?  (requiring-resolve 'malli.core/validate)]
           (try
             (init! {:dirs [c]})
-            (extend! {:dirs [p]})
-            (testing "a plugged-in root is removed; a core root is retained, with the reason"
-              (let [out (hot-remove! [p c])]
+            (is (r/ok? (hport/-extend-dirs! port {:dirs [p] :owner "x"})))
+            (is (r/ok? (hport/-extend-dirs! port {:dirs [p] :owner "y"})))
+            (testing "a dir another owner claims is kept and shared"
+              (let [out (hport/-remove-dirs! port {:dirs [p] :owner "x"})]
+                (is (r/ok? out))
+                (is (valid? Report (:ok out)) (pr-str out))
+                (is (= [p] (:kept (:ok out))))
+                (is (= {p ["y"]} (:shared (:ok out))))))
+            (testing "the last owner's release removes it; a core dir is kept"
+              (let [out (:ok (hport/-remove-dirs! port {:dirs [p c] :owner "y"}))]
+                (is (valid? Report out) (pr-str out))
                 (is (= [p] (:removed out)))
-                (is (= [c] (:retained out)))
-                (is (string? (:reason out)))))
-            (testing "the signature eject! calls is the one hive-hot answers"
-              (is (= {:removed [] :kept [] :absent [p] :dirs [c]} (remove-dirs! {:dirs [p]}))))
+                (is (= [c] (:kept out)))))
+            (testing "idempotent: a second release finds it absent"
+              (is (= [p] (:absent (:ok (hport/-remove-dirs! port {:dirs [p] :owner "y"}))))))
             (finally (reset!*))))
-        (testing "a hive-hot without remove-dirs! retains every dir and says why"
-          (let [out (hot-remove! [p])]
-            (is (= [] (:removed out)))
-            (is (= [p] (:retained out)))
-            (is (string? (:reason out))))))
+        (testing "a hive-hot without remove-dirs! answers an err naming why"
+          (let [out (hport/-remove-dirs! port {:dirs [p] :owner "x"})]
+            (is (r/err? out))
+            (is (string? (:message out))))))
       (finally (delete-tree! core) (delete-tree! plugged)))))

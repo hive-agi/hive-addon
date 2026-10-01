@@ -69,3 +69,35 @@
    sorted. A dir two addons share stays watched while either is mounted."
   [ejected-dirs remaining-dirs]
   (vec (sort (remove (set remaining-dirs) (distinct ejected-dirs)))))
+
+;; =============================================================================
+;; dirs-outcome — what hive-hot's remove-dirs! answers, read for an EjectReport
+;; =============================================================================
+
+(defn dirs-outcome
+  "Fold the answers to one remove-dirs! request per ejected owner into
+   {:removed [dir] :retained [dir] :shared {dir [owner]} :reason string?}.
+
+   ANSWERS are each either a hive-hot RemoveDirsReport wrapped as {:ok report},
+   or an err Result {:error kw :message string} — then every dir of that request
+   (REQUESTED, the same order as ANSWERS) is retained, with the message as the
+   reason. A dir one request kept (another owner still claimed it) and a later
+   one removed IS removed. :absent dirs were never watched and are neither."
+  [requested answers]
+  (let [rows     (map vector requested answers)
+        removed  (into #{} (mapcat (fn [[_ a]] (when-not (contains? a :error) (:removed (:ok a))))) rows)
+        kept     (into #{} (mapcat (fn [[req a]] (if (contains? a :error)
+                                                   (:dirs req)
+                                                   (:kept (:ok a)))))
+                       rows)
+        shared   (apply merge-with (comp vec distinct concat)
+                        (keep (fn [[_ a]] (some-> (:ok a) :shared not-empty)) rows))
+        retained (vec (sort (remove removed kept)))
+        shared   (into {} (filter (comp (set retained) key)) shared)
+        errs     (keep (fn [[_ a]] (when (contains? a :error) (:message a))) rows)
+        reason   (cond
+                   (seq errs) (first errs)
+                   (seq shared) "hive-hot keeps the dirs another owner still claims"
+                   (seq retained) "hive-hot keeps the dirs its initial init declared")]
+    (cond-> {:removed (vec (sort removed)) :retained retained :shared shared}
+      reason (assoc :reason reason))))

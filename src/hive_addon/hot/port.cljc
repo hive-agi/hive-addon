@@ -62,3 +62,17 @@
     "{id instance} for the `ids` that `host` currently holds, read BEFORE
      teardown. Handed to -mount! as the :fallback-instance, so an addon whose
      new instance fails is restored to its previous one, in order."))
+
+(defprotocol IHotDirs
+  "The source roots hive-hot tracks and watches — the one hive-hot capability a
+   plug IN / plug OUT needs. Owner-scoped: a dir stays tracked while an owner
+   other than the releasing one still claims it."
+  (-extend-dirs! [this req]
+    "Track and watch REQ {:dirs [dir] :owner any :no-reload #{sym}} without
+     resetting the change baseline. Returns hive-hot's ExtendInitReport
+     {:dirs [dir] :added [dir]}, or a hive-dsl err Result.")
+  (-remove-dirs! [this req]
+    "Release REQ {:dirs [dir] :owner any}. Returns hive-hot's RemoveDirsReport
+     {:removed [dir] :kept [dir] :absent [dir] :dirs [dir] :shared {dir [owner]}},
+     or a hive-dsl err Result. :kept holds a core dir or one another owner
+     still claims (then also under :shared)."))

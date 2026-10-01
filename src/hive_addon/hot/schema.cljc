@@ -213,7 +213,10 @@
    :hot/unsupported  ids whose host has no IMountUnregister and still holds an
                      inert, shut-down entry.
    :hot/dirs-retained  source dirs still watched: shared with a surviving addon,
-                     or hive-hot offers no remove-dirs! (see :hot/dirs-reason).
+                     a core dir hive-hot's initial init declared, one another
+                     owner still claims (then under :hot/dirs-shared {dir
+                     [owner]}), or hive-hot offers no remove-dirs! (see
+                     :hot/dirs-reason).
    :hot/classpath-retained  URLs that stay on the DynamicClassLoader. A
                      java.net.URLClassLoader cannot drop a URL; the code stays
                      loadable until the JVM restarts.
@@ -238,6 +241,7 @@
    [:hot/dirs-removed [:sequential :string]]
    [:hot/dirs-retained [:sequential :string]]
    [:hot/dirs-reason {:optional true} :string]
+   [:hot/dirs-shared {:optional true} [:map-of :string [:sequential :any]]]
    [:hot/classpath-retained [:sequential :string]]
    [:hot/namespaces-retained [:sequential :string]]
    [:hot/remounted {:optional true} [:sequential s/AddonId]]
