@@ -391,6 +391,98 @@
       (testing "an addon nothing reloaded keeps the instance it had"
         (is (= 1 (generation-of host "probe.out")))))))
 
+;; =============================================================================
+;; An empty reload is loud — "remounted" must never read as "new code"
+;; =============================================================================
+
+(deftest a-manual-reload-that-loads-nothing-says-so
+  (testing "the reloader answered no namespace: the remount rebuilt the instances
+            from whatever code was already loaded, and the report must SAY that
+            rather than read as a successful reload of new code"
+    (let [[host _] (mount-chain!)
+          report   (hot/reload-addon! host chain-specs "probe.a"
+                                      {:reload-ns! (fn [_] {:loaded []})})]
+      (testing "a no-change remount is not a hard failure"
+        (is (:ok? report) (pr-str (:errors report)))
+        (is (= 2 (generation-of host "probe.a"))))
+      (is (true? (:hot/ns-empty-reload report)))
+      (is (= [] (:hot/ns-reloaded report)))
+      (is (some #(re-find #"no namespace was reloaded" %) (:hot/warnings report))
+          (pr-str (:hot/warnings report)))
+      (testing "and a diagnostic names the condition"
+        (is (= :hot/empty-reload (get-in report [:diagnostic :code]))))
+      (is (nil? (hs/humanize-errors hs/RemountReport report))
+          (pr-str (hs/humanize-errors hs/RemountReport report))))))
+
+(deftest an-empty-reload-without-roots-blames-the-source-dir
+  (testing "a seed whose source dir did not resolve has nothing to scope the
+            reload to — the warning must point at THAT, not at the code"
+    (let [orphan (spec "probe.orphan" "make-shared"
+                       :addon/init-ns "definitely.not.on.the.classpath"
+                       :addon/config {:probe/id "probe.orphan"})
+          host   (mount/atom-mount-host)
+          report (hot/reload-addon! host [orphan] "probe.orphan"
+                                    {:reload-ns! (fn [_] {:loaded []})
+                                     :strategies [(strategy/->RemountStrategy)]})]
+      (is (= [] (:hot/roots report)))
+      (is (true? (:hot/ns-empty-reload report)))
+      (is (some #(re-find #"source dir" %) (:hot/warnings report))
+          (pr-str (:hot/warnings report))))))
+
+(deftest a-watcher-reload-is-not-flagged-empty
+  (testing ":ns-reloaded? true — clj-reload already loaded the namespace, so the
+            strategy's own pass is legitimately skipped"
+    (let [[host _] (mount-chain!)
+          report   (hot/reload-namespace! host chain-specs fixture-ns
+                                          {:reload-ns! (fn [_] {:loaded []})})]
+      (is (:ok? report) (pr-str (:errors report)))
+      (is (nil? (:hot/ns-empty-reload report)))
+      (is (empty? (:hot/warnings report))))))
+
+(deftest a-reload-that-loads-something-is-not-flagged-empty
+  (let [[host _] (mount-chain!)
+        report   (hot/reload-addon! host chain-specs "probe.a"
+                                    {:reload-ns! (fn [_] {:loaded [fixture-ns]})})]
+    (is (:ok? report) (pr-str (:errors report)))
+    (is (nil? (:hot/ns-empty-reload report)))
+    (is (empty? (:hot/warnings report)))))
+
+(deftest an-in-place-reload-that-loads-nothing-says-so
+  (let [s        (spec "probe.a" "make-a" :addon/reload-strategy :in-place)
+        [host _] (mount-chain! [s])
+        report   (hot/reload-addon! host [s] "probe.a"
+                                    {:reload-ns! (fn [_] {:loaded []})})]
+    (is (= :in-place (:hot/strategy report)))
+    (is (:ok? report) (pr-str (:errors report)))
+    (is (true? (:hot/ns-empty-reload report)))
+    (is (some #(re-find #"no namespace was reloaded" %) (:hot/warnings report)))
+    (is (nil? (hs/humanize-errors hs/RemountReport report))
+        (pr-str (hs/humanize-errors hs/RemountReport report)))))
+
+(deftest stamped-source-dirs-make-a-spec-reloadable-off-the-classpath
+  (testing "an injected addon whose source the calling thread's loader cannot
+            see still resolves as :directory through the dirs stamped on its spec"
+    (let [root (doto (java.io.File. (System/getProperty "java.io.tmpdir")
+                                    (str "hive-addon-stamped-" (System/nanoTime)))
+                 .mkdirs)
+          root-path (.getCanonicalPath root)
+          f    (java.io.File. root "stamped_probe/ctor.clj")]
+      (try
+        (.mkdirs (.getParentFile f))
+        (spit f "(ns stamped-probe.ctor)\n")
+        (let [s   (spec "probe.stamped" "make"
+                        :addon/init-ns "stamped-probe.ctor"
+                        :hot/source-dirs [root-path])
+              src (source/spec-source s)]
+          (is (= :directory (:hot/source-kind src)))
+          (is (true? (:hot/reloadable? src)))
+          (is (= root-path (:hot/source-dir src)))
+          (is (= #{root-path} (source/watchable-dirs [s]))))
+        (testing "without the stamp the same namespace is absent"
+          (is (= :absent (:hot/source-kind (source/resolve-source "stamped-probe.ctor")))))
+        (finally
+          (.delete f) (.delete (.getParentFile f)) (.delete root))))))
+
 (deftest reloaded-namespaces-are-reported-as-strings-whatever-the-reloader-answers
   (testing "clj-reload answers with SYMBOLS while :addon/init-ns and the report
             schema are both STRINGS — an unconverted symbol matches no addon and

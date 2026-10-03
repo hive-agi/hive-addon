@@ -140,9 +140,15 @@
 
 (defn- seed-roots
   "Classpath source dirs of the seed addons — what the namespace reload is
-   scoped to. Jar-backed and absent seeds contribute nothing."
+   scoped to. The dirs a seed spec CARRIES (:hot/source-dirs, stamped by
+   inject!) are unioned with the ones resolved from the classpath, so an
+   injected addon has roots even on a thread whose loader cannot see it.
+   Jar-backed and absent seeds without stamped dirs contribute nothing."
   [specs seeds]
-  (vec (source/watchable-dirs (filter #(contains? seeds (:addon/id %)) specs))))
+  (let [seed-specs (filter #(contains? seeds (:addon/id %)) specs)]
+    (vec (sort (into (set (source/watchable-dirs seed-specs))
+                     (comp (mapcat :hot/source-dirs) (map str))
+                     seed-specs)))))
 
 (defn- reload-ctx
   [host specs spec seeds {:keys [trigger changed-ns ns-reloaded? mount-opts
