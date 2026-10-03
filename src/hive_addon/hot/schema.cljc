@@ -91,6 +91,14 @@
    [:ok? :boolean]
    [:errors {:optional true} [:sequential :string]]])
 
+(def HotWarning
+  "One thing a reload that SUCCEEDED wants the operator to know. :hot/warning
+   names it (e.g. :hot/no-namespace-reloaded), :message says it in a sentence.
+   Open, so a warning can carry its own evidence (:hot/cause, :hot/roots)."
+  [:map {:closed false}
+   [:hot/warning :keyword]
+   [:message :string]])
+
 (def RemountReport
   "Outcome of reloading an addon and its transitive dependents.
 
@@ -116,6 +124,11 @@
    var provably did not change — both are the \"reloaded, but the code did not\"
    shape, and the second REFUSES the remount.
 
+   :hot/warnings are HotWarnings on a report that may still be :ok?. A manual
+   reload whose namespace pass loaded nothing carries
+   :hot/no-namespace-reloaded: the remount ran, but from the code that was
+   already in the image.
+
    :hot/strategy names the strategy that ran. :teardown/data-preserved? inherits
    the no-nuke invariant: [:= true]. Open."
   [:map {:closed false}
@@ -134,6 +147,7 @@
    [:hot/multi-file {:optional true} [:map-of :string [:sequential :string]]]
    [:hot/stale-ctors {:optional true} [:sequential :string]]
    [:hot/widened {:optional true} [:set s/AddonId]]
+   [:hot/warnings {:optional true} [:sequential HotWarning]]
    [:teardown/data-preserved? [:= true]]
    [:mounted [:sequential ms/MountResult]]
    [:ok? :boolean]

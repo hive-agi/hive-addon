@@ -675,6 +675,69 @@
       (is (= 2 (generation-of host "probe.a"))))))
 
 ;; =============================================================================
+;; A manual reload that loaded no namespace says so
+;; =============================================================================
+
+(deftest empty-reload-warning-table
+  (let [roots ["/src"]
+        ctx   (fn [trigger ns-reloaded? roots]
+                {:hot/trigger trigger :hot/ns-reloaded? ns-reloaded? :hot/roots roots})
+        ok    (fn [loaded & {:as extra}] (merge {:ok? true :loaded loaded} extra))]
+    (doseq [[label c res expected-cause]
+            [["manual, nothing loaded, no roots"   (ctx :manual false [])    (ok [])                  :no-roots]
+             ["manual, nothing loaded, unchanged"  (ctx :manual false roots) (ok [] :unchanged? true) :unchanged]
+             ["manual, nothing loaded, roots"      (ctx :manual false roots) (ok [])                  :nothing-loaded]
+             ["manual, a namespace loaded"         (ctx :manual false roots) (ok ["a.ns"])            nil]
+             ["manual, failed pass"                (ctx :manual false roots) {:ok? false :loaded []}  nil]
+             ["callback, ns already reloaded"      (ctx :ns-reload true [])  (ok [])                  nil]
+             ["file-change trigger"                (ctx :file-change false []) (ok [])                nil]]]
+      (testing label
+        (let [w (strategy/empty-reload-warning c res)]
+          (is (= expected-cause (:hot/cause w)))
+          (when expected-cause
+            (is (= :hot/no-namespace-reloaded (:hot/warning w)))
+            (is (string? (:message w)))
+            (is (= (vec (:hot/roots c)) (:hot/roots w)))))))))
+
+(deftest a-manual-reload-that-loaded-nothing-warns-but-stays-ok
+  (let [[host _] (mount-chain!)
+        report   (hot/reload-addon! host chain-specs "probe.a"
+                                    {:reload-ns! (fn [_] {:loaded []})})]
+    (testing "the remount itself succeeded, so :ok? is not flipped"
+      (is (:ok? report) (pr-str (:errors report)))
+      (is (= 2 (generation-of host "probe.a"))))
+    (is (= [:hot/no-namespace-reloaded] (mapv :hot/warning (:hot/warnings report))))
+    (is (nil? (hs/humanize-errors hs/RemountReport report))
+        (pr-str (hs/humanize-errors hs/RemountReport report)))))
+
+(deftest a-manual-reload-that-loaded-its-namespace-does-not-warn
+  (let [[host _] (mount-chain!)
+        report   (hot/reload-addon! host chain-specs "probe.a"
+                                    {:reload-ns! (fn [nss] {:loaded nss})})]
+    (is (:ok? report) (pr-str (:errors report)))
+    (is (nil? (:hot/warnings report)))))
+
+(deftest a-namespace-callback-reload-does-not-warn
+  (testing "clj-reload loaded the namespace before the callback fired"
+    (let [[host _] (mount-chain!)
+          report   (hot/reload-namespace! host chain-specs fixture-ns
+                                          {:reload-ns! (fn [_] {:loaded []})})]
+      (is (:ok? report) (pr-str (:errors report)))
+      (is (nil? (:hot/warnings report))))))
+
+(deftest in-place-warns-on-an-empty-manual-reload
+  (let [s      (spec "probe.a" "make-a" :addon/reload-strategy :in-place)
+        host   (mount/atom-mount-host)
+        _      (mount/mount! (mount/solve [s]) host)
+        report (hot/reload-addon! host [s] "probe.a"
+                                  {:reload-ns! (fn [_] {:loaded [] :unchanged? true})})]
+    (is (= :in-place (:hot/strategy report)))
+    (is (:ok? report) (pr-str (:errors report)))
+    (is (= [:hot/no-namespace-reloaded] (mapv :hot/warning (:hot/warnings report))))
+    (is (nil? (hs/humanize-errors hs/RemountReport report))
+        (pr-str (hs/humanize-errors hs/RemountReport report)))))
+
+;; =============================================================================
 ;; A reload that claims a load that did not happen is refused
 ;; =============================================================================
 

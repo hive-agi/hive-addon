@@ -146,15 +146,45 @@
                              (identical? (get before ns) (get after ns))))))
         loaded))
 
+(defn empty-reload-warning
+  "The warning a MANUAL reload owes when its own namespace pass loaded nothing,
+   or nil. Pure.
+
+   Without it, an empty reload reads like a success that picked up new code: the
+   remount rebuilt every instance from what the image already held. A callback
+   reload (:hot/ns-reloaded? true) is never flagged, because clj-reload loaded
+   the namespaces before the callback fired. A failed pass is never flagged
+   either, because its :errors already say what happened. :hot/cause tells the
+   reasons apart: :no-roots (the seed's source dir was never resolved, so the
+   scoped reload had nothing to scan), :unchanged (the reloader saw no change
+   under the roots), :nothing-loaded (the reloader answered without loading, or
+   none was injected)."
+  [ctx ns-res]
+  (let [roots (vec (:hot/roots ctx []))]
+    (when (and (= :manual (:hot/trigger ctx :manual))
+               (not (:hot/ns-reloaded? ctx))
+               (:ok? ns-res)
+               (empty? (:loaded ns-res)))
+      {:hot/warning :hot/no-namespace-reloaded
+       :hot/cause   (cond (empty? roots)        :no-roots
+                          (:unchanged? ns-res)  :unchanged
+                          :else                 :nothing-loaded)
+       :hot/roots   roots
+       :message     "no namespace was reloaded; the mounted code is whatever was already loaded"})))
+
 (defn- with-ns-outcome
-  "Fold what the namespace reloader answered beyond :loaded into a report."
-  [report ns-res]
-  (cond-> report
-    (:diagnostic ns-res) (assoc :diagnostic (:diagnostic ns-res))
-    (seq (:skipped ns-res))        (assoc :hot/ns-skipped (vec (:skipped ns-res)))
-    (seq (:dragged ns-res))        (assoc :hot/ns-dragged (vec (:dragged ns-res)))
-    (seq (:multi-file ns-res))     (assoc :hot/multi-file (:multi-file ns-res))
-    (contains? ns-res :unchanged?) (assoc :hot/ns-unchanged? (:unchanged? ns-res))))
+  "Fold what the namespace reloader answered beyond :loaded into a report,
+   including the empty-reload warning. :ok? is left alone: the remount did
+   succeed, and the warning is how the report says the code may be old."
+  [report ctx ns-res]
+  (let [warning (empty-reload-warning ctx ns-res)]
+    (cond-> report
+      (:diagnostic ns-res) (assoc :diagnostic (:diagnostic ns-res))
+      (seq (:skipped ns-res))        (assoc :hot/ns-skipped (vec (:skipped ns-res)))
+      (seq (:dragged ns-res))        (assoc :hot/ns-dragged (vec (:dragged ns-res)))
+      (seq (:multi-file ns-res))     (assoc :hot/multi-file (:multi-file ns-res))
+      (contains? ns-res :unchanged?) (assoc :hot/ns-unchanged? (:unchanged? ns-res))
+      warning                        (update :hot/warnings (fnil conj []) warning))))
 
 (defn- stale-refusal
   "Refuse a reload whose namespace pass claimed more than it did: the image
@@ -170,7 +200,7 @@
       (assoc :hot/affected ids
              :hot/stale-ctors stale
              :hot/ns-reloaded (mapv str (:loaded ns-res)))
-      (with-ns-outcome ns-res)))
+      (with-ns-outcome ctx ns-res)))
 
 ;; =============================================================================
 ;; Built-in strategy: :remount (the default)
@@ -254,7 +284,7 @@
             (not (:ok? ns-res))
             (-> (refusal (-strategy-id this) ctx (:errors ns-res))
                 (assoc :hot/affected ids)
-                (with-ns-outcome ns-res))
+                (with-ns-outcome ctx ns-res))
 
             (seq stale)
             (stale-refusal (-strategy-id this) ctx ids ns-res stale)
@@ -286,7 +316,7 @@
                                  :hot/ns-reloaded loaded
                                  :mounted (vec (:mounted report))
                                  :ok? (and (:ok? report) (empty? (:errors td))))
-                          (with-ns-outcome ns-res))
+                          (with-ns-outcome ctx ns-res))
                 (seq widened)        (assoc :hot/widened widened)
                 (seq (:cycles plan)) (assoc :hot/cycles (:cycles plan))
                 (seq errors)         (assoc :errors (vec errors))))))))))
@@ -338,7 +368,7 @@
                     (assoc :hot/affected [id]
                            :hot/ns-reloaded (mapv str (:loaded ns-res))
                            :ok? (:ok? ns-res))
-                    (with-ns-outcome ns-res))
+                    (with-ns-outcome ctx ns-res))
           (seq (:errors ns-res)) (assoc :errors (vec (:errors ns-res))))))))
 
 ;; =============================================================================
