@@ -9,9 +9,11 @@
    portable stratum, and the host mounts it through the generic proxy here.
 
    Nothing in the mount path is special-cased for it. An opaque addon is an
-   ORDINARY mount manifest with :addon/type :external and :addon/trust-class
-   :proprietary, so the existing licence gate (hive-addon.mount.entitlement)
-   governs it, and an unlicensed addon's constructor namespace is never loaded.
+   ORDINARY mount manifest with :addon/type :external and the :addon/trust-class
+   its spec declares (:opaque/trust-class, default :external). A spec that
+   declares :proprietary is governed by the existing licence gate
+   (hive-addon.mount.entitlement), and an unlicensed addon's constructor
+   namespace is never loaded.
 
    The vendor's side of the same wire is hive-addon.opaque.serve, and
    `entry-source` writes the entry that calls it, so the kernel and the proxy
@@ -56,7 +58,8 @@
             [hive-addon.opaque.codec :as codec]
             [hive-addon.opaque.serve :as serve]
             [hive-addon.opaque.transport.inproc :as inproc]
-            [hive-addon.opaque.transport.subprocess :as subprocess]))
+            [hive-addon.opaque.transport.subprocess :as subprocess]
+            [hive-addon.mount.entitlement :as ent]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -67,6 +70,8 @@
 (def ^:private ctor-ns "hive-addon.opaque")
 
 (def ^:private ctor-fn "addon-ctor")
+
+(def ^:private default-trust-class :external)
 
 ;; =============================================================================
 ;; Reaching a kernel
@@ -136,24 +141,30 @@
 (defn ->manifest
   "Derive a mount manifest (plain data) from an OpaqueSpec.
 
-   :addon/type is :external because the kernel is an out-of-process integration,
-   and :addon/trust-class is :proprietary so the licence gate governs it. The
-   spec rides as :addon/config, which `addon-ctor` reads back.
+   :addon/type is :external. :addon/trust-class is the spec's
+   :opaque/trust-class, else :external. :addon/entitlement is the spec's
+   :opaque/entitlement, else :opaque/id when the trust-class is gated
+   (hive-addon.mount.entitlement/gated-trust-classes), else absent. The spec
+   rides as :addon/config, which `addon-ctor` reads back.
 
    :addon/capabilities carries only what must be known before the kernel runs.
    The kernel's tools are NOT enumerated here: it self-describes, so a new build
    with new tools needs no new manifest."
   [spec]
-  {:addon/id           (:opaque/id spec)
-   :addon/type         :external
-   :addon/init-ns      ctor-ns
-   :addon/init-fn      ctor-fn
-   :addon/trust-class  :proprietary
-   :addon/entitlement  (:opaque/id spec)
-   :addon/capabilities (into #{:tools :health-reporting}
-                             (or (:opaque/capabilities spec) #{}))
-   :addon/description  (str "Opaque kernel sidecar: " (:opaque/id spec))
-   :addon/config       spec})
+  (let [trust-class (or (:opaque/trust-class spec) default-trust-class)
+        entitlement (or (:opaque/entitlement spec)
+                        (when (contains? ent/gated-trust-classes trust-class)
+                          (:opaque/id spec)))]
+    (cond-> {:addon/id           (:opaque/id spec)
+             :addon/type         :external
+             :addon/init-ns      ctor-ns
+             :addon/init-fn      ctor-fn
+             :addon/trust-class  trust-class
+             :addon/capabilities (into #{:tools :health-reporting}
+                                       (or (:opaque/capabilities spec) #{}))
+             :addon/description  (str "Opaque kernel sidecar: " (:opaque/id spec))
+             :addon/config       spec}
+      entitlement (assoc :addon/entitlement entitlement))))
 
 (defn manifest->edn
   "Serialize a manifest to EDN text with the printer pinned, so keyword keys
