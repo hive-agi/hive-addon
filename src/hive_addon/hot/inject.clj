@@ -166,6 +166,19 @@
    :mounted []
    :ok? true})
 
+(defn- stamp-source-dirs
+  "Record the injected project's source DIRECTORIES on a fresh spec, as
+   :hot/source-dirs. The URL inject! adds lives on one DynamicClassLoader; a
+   reload driven from a thread outside that chain cannot resolve the source
+   through the classpath, so the spec has to carry where it lives. Jars are
+   left out — their bytes cannot change, so they are no reload root."
+  [paths spec]
+  (let [dirs (into [] (comp (filter #(.isDirectory (io/file %)))
+                            (map #(.getCanonicalPath (io/file %))))
+                   paths)]
+    (cond-> spec
+      (seq dirs) (assoc :hot/source-dirs dirs))))
+
 (defn inject!
   "Mount the addons whose manifests live under `path` into the running `host`,
    alongside `specs` — the MountSpecs already mounted (the reload bridge's
@@ -174,6 +187,10 @@
 
    `path` is a project dir (its deps.edn :paths are the entries), a plain
    source dir, or a jar.
+
+   Each injected spec is stamped with :hot/source-dirs and returned under
+   :hot/specs: the host keeps THOSE as the addon's effective specs, so a later
+   reload is scoped to the injected source on any thread.
 
    opts: {:mount-opts    forwarded to mount! (e.g. :resolve-config); the keys
                          in hive-addon.hot/mount-opt-keys are folded in from
@@ -204,7 +221,7 @@
             registered? (fn [id] (or (contains? mounted id)
                                      (some? (r/rescue nil (port/registered host id)))))
             {fresh false already true} (group-by (comp boolean registered? :addon/id) new-specs)
-            fresh       (vec fresh)
+            fresh       (mapv #(stamp-source-dirs paths %) fresh)
             fresh-ids   (into #{} (map :addon/id) fresh)
             base        (cond-> (assoc base
                                        :hot/classpath (vec cp)
@@ -242,6 +259,7 @@
                                         (:mounted report))
                              (:error dirs-added) (conj (str "hive-hot extend-init!: " (:error dirs-added))))]
             (cond-> (assoc base
+                           :hot/specs fresh
                            :hot/affected ids
                            :hot/torn-down (vec (:torn-down td))
                            :mounted (vec (:mounted report))

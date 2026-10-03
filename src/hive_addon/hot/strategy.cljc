@@ -156,6 +156,39 @@
     (seq (:multi-file ns-res))     (assoc :hot/multi-file (:multi-file ns-res))
     (contains? ns-res :unchanged?) (assoc :hot/ns-unchanged? (:unchanged? ns-res))))
 
+(defn- empty-reload-warning
+  "The sentence an empty reload reports. With no roots the cause is upstream of
+   the reloader: the seed's source dir never resolved, so there was nothing to
+   scope the reload to."
+  [roots]
+  (str "no namespace was reloaded; the mounted code is whatever was already loaded"
+       " (roots: " (pr-str (vec roots)) ")"
+       (when (empty? roots)
+         (str ". The seed's source dir was not resolved, so the reload had no root"
+              " to scan: check :hot/source-kind in `hot list`, or inject the addon"
+              " so its spec carries :hot/source-dirs"))))
+
+(defn- with-empty-reload
+  "Flag a reload whose OWN namespace pass loaded nothing.
+
+   The remount still rebuilt every instance, so the report stays :ok? \u2014 a
+   no-change remount is legitimate \u2014 but it must not read as new code: it gets
+   :hot/ns-empty-reload, a :hot/warnings line and a diagnostic. A reload driven
+   by the watcher (:hot/ns-reloaded? true) already had its namespaces loaded by
+   clj-reload and is never flagged."
+  [report ctx loaded]
+  (if (or (:hot/ns-reloaded? ctx) (seq loaded))
+    report
+    (let [warning (empty-reload-warning (:hot/roots ctx []))]
+      (cond-> (-> report
+                  (assoc :hot/ns-empty-reload true)
+                  (update :hot/warnings (fnil conj []) warning))
+        (nil? (:diagnostic report))
+        (assoc :diagnostic {:code :hot/empty-reload
+                            :retryable true
+                            :actions [{:tool "hot" :arguments {:command "list"}}]
+                            :message warning})))))
+
 (defn- stale-refusal
   "Refuse a reload whose namespace pass claimed more than it did: the image
    still holds the previous constructor, so remounting would rebuild from OLD
@@ -286,7 +319,8 @@
                                  :hot/ns-reloaded loaded
                                  :mounted (vec (:mounted report))
                                  :ok? (and (:ok? report) (empty? (:errors td))))
-                          (with-ns-outcome ns-res))
+                          (with-ns-outcome ns-res)
+                          (with-empty-reload ctx loaded))
                 (seq widened)        (assoc :hot/widened widened)
                 (seq (:cycles plan)) (assoc :hot/cycles (:cycles plan))
                 (seq errors)         (assoc :errors (vec errors))))))))))
@@ -331,14 +365,16 @@
           ns-res (reload-namespaces! ctx [(:addon/init-ns spec)])
           stale  (when before
                    (stale-constructors before (constructor-roots ctx [spec])
-                                       (:loaded ns-res)))]
+                                       (:loaded ns-res)))
+          loaded (mapv str (:loaded ns-res))]
       (if (seq stale)
         (stale-refusal (-strategy-id this) ctx [id] ns-res stale)
         (cond-> (-> (base-report (-strategy-id this) ctx)
                     (assoc :hot/affected [id]
-                           :hot/ns-reloaded (mapv str (:loaded ns-res))
+                           :hot/ns-reloaded loaded
                            :ok? (:ok? ns-res))
                     (with-ns-outcome ns-res))
+          (:ok? ns-res)          (with-empty-reload ctx loaded)
           (seq (:errors ns-res)) (assoc :errors (vec (:errors ns-res))))))))
 
 ;; =============================================================================

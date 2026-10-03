@@ -134,6 +134,9 @@
    [:hot/multi-file {:optional true} [:map-of :string [:sequential :string]]]
    [:hot/stale-ctors {:optional true} [:sequential :string]]
    [:hot/widened {:optional true} [:set s/AddonId]]
+   [:hot/ns-empty-reload {:optional true} :boolean]
+   [:hot/warnings {:optional true} [:sequential :string]]
+   [:diagnostic {:optional true} [:map {:closed false}]]
    [:teardown/data-preserved? [:= true]]
    [:mounted [:sequential ms/MountResult]]
    [:ok? :boolean]
@@ -153,8 +156,10 @@
    :hot/torn-down). :mounted carries the per-addon MountResult from the
    ordinary mount pipeline. :hot/dirs-added are the source dirs handed to
    hive-hot so the new addons reload like the rest; :hot/registered the ids
-   registered as hive-hot components. :teardown/data-preserved? inherits the
-   no-nuke invariant: [:= true]. Open."
+   registered as hive-hot components. :hot/specs are the injected specs as
+   mounted, each stamped with :hot/source-dirs — what the host keeps as their
+   effective specs, so a later reload is scoped to those dirs on any thread.
+   :teardown/data-preserved? inherits the no-nuke invariant: [:= true]. Open."
   [:map {:closed false}
    [:hot/path :string]
    [:hot/paths [:sequential :string]]
@@ -164,6 +169,7 @@
    [:hot/discovered [:sequential s/AddonId]]
    [:hot/already-mounted [:sequential s/AddonId]]
    [:hot/injected [:sequential s/AddonId]]
+   [:hot/specs {:optional true} [:sequential ms/MountSpec]]
    [:hot/affected [:sequential s/AddonId]]
    [:hot/torn-down [:sequential s/AddonId]]
    [:hot/missing {:optional true} [:map-of :any :any]]
