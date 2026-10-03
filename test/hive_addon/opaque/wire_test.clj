@@ -291,9 +291,13 @@
     (is (ms/validate ms/MountSpec manifest)
         (str "manifest is not a MountSpec: " (ms/humanize-errors ms/MountSpec manifest)))
     (is (= :external (:addon/type manifest)))
-    (testing "trust-class is what puts it under the licence gate"
-      (is (= :proprietary (:addon/trust-class manifest)))
-      (is (= "acme.rank" (:addon/entitlement manifest))))
+    (testing "trust-class comes from the spec, and an undeclared one is ungated"
+      (is (= :external (:addon/trust-class manifest)))
+      (is (not (contains? manifest :addon/entitlement))))
+    (testing "a spec declaring :proprietary is what puts it under the licence gate"
+      (let [paid (opaque/->manifest (assoc spec :opaque/trust-class :proprietary))]
+        (is (= :proprietary (:addon/trust-class paid)))
+        (is (= "acme.rank" (:addon/entitlement paid)))))
     (testing "the constructor is the generic one, the same for every vendor"
       (is (= "hive-addon.opaque" (:addon/init-ns manifest)))
       (is (= "addon-ctor" (:addon/init-fn manifest))))

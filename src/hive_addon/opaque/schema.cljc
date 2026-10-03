@@ -20,7 +20,8 @@
             [malli.error :as me]
             [malli.registry :as mr]
             [hive-addon.schema :as s]
-            [hive-dsl.result :as r]))
+            [hive-dsl.result :as r]
+            [hive-addon.plug.schema :as ps]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -115,6 +116,11 @@
    advertises before the kernel is running. Rides as :addon/config of the mount
    manifest.
 
+   :opaque/trust-class is the manifest's :addon/trust-class (a
+   hive-addon.plug.schema/TrustClass; default :external). :opaque/entitlement
+   is the licence unit a gate is asked about; when absent, a gated trust-class
+   uses :opaque/id.
+
    :opaque/request-timeout-ms bounds each request to a kernel that has answered
    once (default 30000); :opaque/init-timeout-ms bounds the first request after
    each kernel start, which is :addon/initialize! and also pays the process
@@ -125,6 +131,8 @@
    [:opaque/args {:optional true} [:vector :string]]
    [:opaque/id {:optional true} s/AddonId]
    [:opaque/capabilities {:optional true} s/CapabilitySet]
+   [:opaque/trust-class {:optional true} ps/TrustClass]
+   [:opaque/entitlement {:optional true} [:string {:min 1}]]
    [:opaque/request-timeout-ms {:optional true} TimeoutMs]
    [:opaque/init-timeout-ms {:optional true} TimeoutMs]])
 
