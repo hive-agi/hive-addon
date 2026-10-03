@@ -78,8 +78,9 @@
    [:last-error {:optional true} [:maybe :string]]])
 
 (def KeepReason
-  "Why a sweep left an addon mounted."
-  [:enum :pinned :eager :not-active :in-flight :dependent-active :fresh :never-used])
+  "Why a sweep left an addon mounted. :no-surface — nothing could be advertised
+   for it while dormant, so it could never be woken again."
+  [:enum :pinned :eager :not-active :no-surface :in-flight :dependent-active :fresh :never-used])
 
 (def SweepPlan
   ":evict is ordered dependents-first, so evicting in order never pulls an
@@ -100,13 +101,18 @@
    [:errors {:optional true} [:sequential :string]]])
 
 (def EvictionReport
+  "Outcome of evict!. A REFUSAL is never dressed as success: it carries
+   :refused? true, :ok? false and the :reason. :teardown/data-preserved? is
+   present only when something was actually released (:evicted? true), and is
+   then computed from what the host's unmount answered."
   [:map {:closed false}
    [:addon/id s/AddonId]
    [:ok? :boolean]
    [:evicted? :boolean]
+   [:refused? {:optional true} :boolean]
    [:reason {:optional true} [:or KeepReason :keyword]]
    [:parts-closed {:optional true} [:sequential :keyword]]
-   [:teardown/data-preserved? [:= true]]
+   [:teardown/data-preserved? {:optional true} :boolean]
    [:errors {:optional true} [:sequential :string]]])
 
 (def BootReport
@@ -116,6 +122,18 @@
    [:downgraded [:map-of s/AddonId :keyword]]
    [:mount {:optional true} ms/MountReport]
    [:ok? :boolean]])
+
+(def ReseatReport
+  "Outcome of reseat-host!. A failed reseat (:reseated? false) left the old host
+   seated and nothing changed. :rearmed are the dormant addons whose stubs were
+   installed on the new host (a dormant addon with no surface has none)."
+  [:map {:closed false}
+   [:ok? :boolean]
+   [:reseated? :boolean]
+   [:installed? {:optional true} :boolean]
+   [:sweeper-moved? {:optional true} :boolean]
+   [:rearmed {:optional true} [:sequential s/AddonId]]
+   [:errors {:optional true} [:sequential :string]]])
 
 ;; =============================================================================
 ;; Local registry
@@ -130,7 +148,8 @@
    :lifecycle/sweep-plan        SweepPlan
    :lifecycle/activation-report ActivationReport
    :lifecycle/eviction-report   EvictionReport
-   :lifecycle/boot-report       BootReport})
+   :lifecycle/boot-report       BootReport
+   :lifecycle/reseat-report     ReseatReport})
 
 (def registry
   (mr/composite-registry ms/registry (mr/registry lifecycle-schemas)))

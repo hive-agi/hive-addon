@@ -35,6 +35,27 @@
     "Fetch a mounted addon instance for sibling injection, or nil."))
 
 ;; =============================================================================
+;; IMountUnregister — the plug-out capability (ISP: a SEPARATE, optional port)
+;; =============================================================================
+
+(defprotocol IMountUnregister
+  "Optional capability of an IMountHost: forget an addon instance entirely.
+
+   Kept OUT of IMountHost on purpose (ISP). Every existing host keeps loading
+   and keeps working without it; a host that does not implement it simply
+   cannot plug an addon OUT — its registry keeps the shut-down entry, and the
+   boundary reports that as :unsupported rather than pretending the addon is
+   gone (see hive-addon.mount.boundary/unregister!).
+
+   The documented default for a host WITHOUT this protocol: after shutdown!
+   the instance stays registered (inert), `registered` may still answer it,
+   and a later register! of the same id must replace it."
+  (unregister! [host addon-id]
+    "Drop ADDON-ID from the host registry. Called only AFTER shutdown!, so it
+     MUST NOT shut the addon down a second time, and MUST NOT delete data.
+     Idempotent: an unknown id is a no-op. Returns host."))
+
+;; =============================================================================
 ;; resolve-config-default — injected config-resolver seam
 ;; =============================================================================
 
@@ -64,11 +85,17 @@
       (proto/shutdown! addon))
     nil)
   (registered [this addon-id]
-    (get @(:reg this) addon-id)))
+    (get @(:reg this) addon-id))
+
+  IMountUnregister
+  (unregister! [this addon-id]
+    (swap! (:reg this) dissoc addon-id)
+    this))
 
 (defn atom-mount-host
   "Construct an in-memory IMountHost backed by an atom map id->addon.
    init! calls hive-addon.protocol/initialize!; shutdown! calls
-   hive-addon.protocol/shutdown!."
+   hive-addon.protocol/shutdown!; it also implements IMountUnregister, so an
+   addon can be plugged out of it."
   []
   (->AtomMountHost (atom {})))

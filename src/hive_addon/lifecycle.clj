@@ -45,7 +45,11 @@
 ;; Manager value
 ;; =============================================================================
 
-(defrecord Manager [host specs states surfaces lock sweeper opts])
+;; SEAT is an atom shared by every Manager built over the same state (see
+;; reseat-host!); it holds the Manager currently governing that state. Anything
+;; that touches the host resolves the manager through it at CALL time, never
+;; through a Manager value captured earlier (Capture-by-Var).
+(defrecord Manager [host specs states surfaces lock sweeper opts seat])
 
 (defn- system-now [] (System/currentTimeMillis))
 
@@ -64,16 +68,27 @@
      :lock-timeout-ms"
   [{:keys [host specs] :as opts}]
   {:pre [(satisfies? lport/ILifecycleHost host)]}
-  (->Manager host
-             (atom (vec specs))
-             (atom {})
-             (atom {})
-             (ReentrantLock.)
-             (atom nil)
-             (merge {:now-ms system-now
-                     :surface-store (lport/->NullSurfaceStore)
-                     :lock-timeout-ms default-lock-timeout-ms}
-                    (dissoc opts :host :specs))))
+  (let [seat (atom nil)
+        mgr  (->Manager host
+                        (atom (vec specs))
+                        (atom {})
+                        (atom {})
+                        (ReentrantLock.)
+                        (atom nil)
+                        (merge {:now-ms system-now
+                                :surface-store (lport/->NullSurfaceStore)
+                                :lock-timeout-ms default-lock-timeout-ms}
+                               (dissoc opts :host :specs))
+                        seat)]
+    (reset! seat mgr)
+    mgr))
+
+(defn current
+  "The Manager now governing MGR's state: the one a later reseat-host! seated,
+   else MGR itself. Resolved at call time, so a caller holding an older Manager
+   value still reaches the current host."
+  [mgr]
+  (or (some-> (:seat mgr) deref) mgr))
 
 (defn- now [mgr] ((get-in mgr [:opts :now-ms])))
 
@@ -94,11 +109,14 @@
   (policy/resolve-all @(:specs mgr) (select-keys (:opts mgr) [:defaults :overrides])))
 
 (defn- with-lock
-  "Run F holding the manager lock, or answer (r/err :lifecycle/lock-timeout)."
+  "Run (F seated) holding the manager lock, where SEATED is the manager current
+   ONCE THE LOCK IS HELD (see `current`), or answer (r/err :lifecycle/lock-timeout).
+   reseat-host! swaps the seat under this same lock, so F never sees a host that
+   a completed reseat replaced."
   [mgr f]
   (let [^ReentrantLock lock (:lock mgr)]
     (if (.tryLock lock (long (get-in mgr [:opts :lock-timeout-ms])) TimeUnit/MILLISECONDS)
-      (try (r/ok (f))
+      (try (r/ok (f (current mgr)))
            (finally (.unlock lock)))
       (r/err :lifecycle/lock-timeout {:message "lifecycle lock not acquired in time"}))))
 
@@ -146,11 +164,23 @@
 
 (declare activate!)
 
+(declare installed-manager)
+
+(defn- stub-manager
+  "The manager a stub call activates through, resolved at CALL time: the
+   installed manager when it governs MGR's state (same lock), else MGR's current
+   seat. A stub armed before a reseat therefore wakes the addon on the new host."
+  [mgr]
+  (let [inst (installed-manager)]
+    (if (and inst (identical? (:lock inst) (:lock mgr)))
+      inst
+      (current mgr))))
+
 (defn- install-stubs! [mgr id]
   (let [[s src] (surface-of mgr id)]
     (update-state! mgr id assoc :surface/source src)
     (when s
-      (r/rescue nil (lport/-install-stubs! (:host mgr) id s #(activate! mgr id))))))
+      (r/rescue nil (lport/-install-stubs! (:host mgr) id s #(activate! (stub-manager mgr) id))))))
 
 (defn- default-reload-ns!
   [roots ns-strs]
@@ -220,9 +250,9 @@
     (activation-report id true [] :already-active? true)
 
     :else
-    (let [res (with-lock mgr #(if (active? mgr id)
-                                (activation-report id true [] :already-active? true)
-                                (do-activate! mgr id)))]
+    (let [res (with-lock mgr (fn [m] (if (active? m id)
+                                       (activation-report id true [] :already-active? true)
+                                       (do-activate! m id))))]
       (if (r/err? res)
         (activation-report id false [] :errors [(:message res)])
         (:ok res)))))
@@ -281,8 +311,21 @@
 ;; Eviction
 ;; =============================================================================
 
-(defn- eviction-report [id evicted? & kvs]
-  (apply assoc {:addon/id id :ok? true :evicted? evicted? :teardown/data-preserved? true} kvs))
+(defn- refused-eviction
+  "An EvictionReport for an eviction that did not happen. Never dressed as
+   success, and it makes no data-preservation claim: nothing was released."
+  [id reason & {:as extra}]
+  (merge {:addon/id id :ok? false :evicted? false :refused? true :reason reason} extra))
+
+(defn- released-eviction
+  "An EvictionReport for an addon that was released. :teardown/data-preserved?
+   is carried over from what the host's unmount CLAIMED; a host that makes no
+   claim gets no verdict (absent, i.e. unknown) rather than an asserted true."
+  [id unmounted & {:as extra}]
+  (merge (cond-> {:addon/id id :ok? true :evicted? true}
+           (contains? unmounted :teardown/data-preserved?)
+           (assoc :teardown/data-preserved? (true? (:teardown/data-preserved? unmounted))))
+         extra))
 
 (defn- claim-eviction!
   "Move ID :active -> :evicting when nothing is in flight. True when claimed."
@@ -298,41 +341,60 @@
   (into [] (comp (remove #{id}) (filter #(active? mgr %)))
         (policy/dependent-closure @(:specs mgr) #{id})))
 
+(def eviction-guards
+  "Why an eviction is REFUSED, as an ordered rule table: [reason refuses?]
+   where (refuses? mgr id state force?) answers true to refuse for that reason.
+   The first rule that fires is the report's :reason. A new reason is a new
+   row; do-evict! never changes.
+
+   :no-surface refuses a surface-less (e.g. hooks-only) addon: evicted, it
+   would have no stub to route a call back through, so its hooks and whole
+   contribution would vanish and it would never re-mount. :force? overrides it
+   exactly as it overrides :pinned — the operator then owns the consequence."
+  [[:not-active       (fn [_ _ st _] (not= :active (:phase st)))]
+   [:pinned           (fn [_ _ st force?] (and (not force?) (= :pinned (get-in st [:lifecycle :policy]))))]
+   [:no-surface       (fn [mgr id _ force?] (and (not force?) (nil? (first (surface-of mgr id)))))]
+   [:dependent-active (fn [mgr id _ _] (boolean (seq (active-dependents mgr id))))]
+   [:in-flight        (fn [mgr id _ _] (not (claim-eviction! mgr id)))]])
+
+(defn- refusal-reason
+  "The first guard in `eviction-guards` that refuses, or nil to proceed. The
+   :in-flight guard CLAIMS the eviction when it lets it through, so it must stay
+   last."
+  [mgr id st force?]
+  (some (fn [[reason refuses?]] (when (refuses? mgr id st force?) reason)) eviction-guards))
+
 (defn- do-evict! [mgr id force?]
-  (let [st (state mgr id)
-        lc (:lifecycle st)]
-    (cond
-      (nil? st)                        (eviction-report id false :ok? false :reason :unknown
-                                                        :errors [(str "no governed addon " (pr-str id))])
-      (not= :active (:phase st))       (eviction-report id false :reason :not-active)
-      (and (not force?) (= :pinned (:policy lc))) (eviction-report id false :reason :pinned)
-      (seq (active-dependents mgr id)) (eviction-report id false :reason :dependent-active)
-      (not (claim-eviction! mgr id))   (eviction-report id false :reason :in-flight)
-      :else
-      (do
-        (learn-surface! mgr id)
-        (let [closed (part/close-owner! id)
-              res    (r/try-effect (lport/-unmount! (:host mgr) id))
-              errs   (cond (r/err? res) [(:message res)]
-                           (:ok? (:ok res)) nil
-                           :else (vec (:errors (:ok res) ["unmount failed"])))]
-          (update-state! mgr id #(-> % (assoc :phase :dormant :in-flight 0)
-                                     (update :evictions inc)
-                                     (assoc :last-error (first errs))))
-          (install-stubs! mgr id)
-          (when-let [f (get-in mgr [:opts :on-evicted])] (r/rescue nil (f id)))
-          (cond-> (eviction-report id true :parts-closed (vec closed))
-            (seq errs) (assoc :errors errs)))))))
+  (let [st (state mgr id)]
+    (if (nil? st)
+      (refused-eviction id :unknown :errors [(str "no governed addon " (pr-str id))])
+      (if-let [reason (refusal-reason mgr id st force?)]
+        (refused-eviction id reason)
+        (do
+          (learn-surface! mgr id)
+          (let [closed (part/close-owner! id)
+                res    (r/try-effect (lport/-unmount! (:host mgr) id))
+                out    (if (r/err? res) {:ok? false :errors [(:message res)]} (:ok res))
+                errs   (when-not (:ok? out) (vec (:errors out ["unmount failed"])))]
+            (update-state! mgr id #(-> % (assoc :phase :dormant :in-flight 0)
+                                       (update :evictions inc)
+                                       (assoc :last-error (first errs))))
+            (install-stubs! mgr id)
+            (when-let [f (get-in mgr [:opts :on-evicted])] (r/rescue nil (f id)))
+            (cond-> (released-eviction id out :parts-closed (vec closed))
+              (seq errs) (assoc :errors errs))))))))
 
 (defn evict!
   "Release ID: shut it down, withdraw its surface, advertise stubs. Refuses while
-   it is in flight or an active addon depends on it. OPTS {:force? true} also
-   evicts a pinned or eager addon. Returns an EvictionReport."
+   it is in flight, an active addon depends on it, it is pinned, or it has no
+   surface a stub could advertise (see `eviction-guards`). OPTS {:force? true}
+   overrides :pinned and :no-surface. Returns an EvictionReport; a refusal is
+   :refused? true / :ok? false with its :reason."
   ([mgr id] (evict! mgr id {}))
   ([mgr id {:keys [force?]}]
-   (let [res (with-lock mgr #(do-evict! mgr id (boolean force?)))]
+   (let [res (with-lock mgr (fn [m] (do-evict! m id (boolean force?))))]
      (if (r/err? res)
-       (eviction-report id false :ok? false :reason :lock-timeout :errors [(:message res)])
+       (refused-eviction id :lock-timeout :errors [(:message res)])
        (:ok res)))))
 
 ;; =============================================================================
@@ -354,7 +416,8 @@
      :parts   (part/sweep! (now mgr))}))
 
 (defn start-sweeper!
-  "Sweep every :sweep-interval-ms on a daemon thread. Idempotent."
+  "Sweep every :sweep-interval-ms on a daemon thread. Idempotent. Each tick
+   sweeps the CURRENT manager (see `current`), never the value captured here."
   ([mgr] (start-sweeper! mgr {}))
   ([mgr {:keys [interval-ms]}]
    (or @(:sweeper mgr)
@@ -365,7 +428,7 @@
                        (doto (Thread. ^Runnable runnable "hive-addon-lifecycle-sweeper")
                          (.setDaemon true)))))]
          (.scheduleWithFixedDelay ^ScheduledExecutorService exec
-                                  ^Runnable (fn [] (r/rescue nil (sweep! mgr)))
+                                  ^Runnable (fn [] (r/rescue nil (sweep! (current mgr))))
                                   ms ms TimeUnit/MILLISECONDS)
          (reset! (:sweeper mgr) {:executor exec :interval-ms ms})
          @(:sweeper mgr)))))
@@ -421,24 +484,64 @@
 
 (defn adopt!
   "Govern SPECS that are ALREADY mounted (hot inject, a host's own boot) as active
-   addons under the resolved policy. Returns the adopted ids."
+   addons under the resolved policy — the manifest's :addon/lifecycle under the
+   manager's defaults and overrides. Returns the adopted ids.
+
+   An adopted addon that nothing could advertise while dormant cannot be :lazy:
+   it is governed as :eager with :downgraded :no-surface (exactly as boot! does),
+   until a surface is learned for it."
   [mgr specs]
   (let [known (set (map :addon/id @(:specs mgr)))]
     (swap! (:specs mgr) into (remove #(contains? known (:addon/id %)) specs)))
   (let [lcs (lifecycles mgr)
         t   (now mgr)]
     (into [] (map (fn [{:keys [addon/id]}]
-                    (swap! (:states mgr) update id
-                           (fn [st] (assoc (or st (fresh-state id (get lcs id)))
-                                           :phase :active :last-used-ms t)))
+                    (let [[s src] (surface-of mgr id)
+                          lc      (get lcs id)
+                          no-surf (and (= :lazy (:policy lc)) (not (policy/lazy-permitted? s)))]
+                      (swap! (:states mgr) update id
+                             (fn [st]
+                               (cond-> (assoc (or st (fresh-state id lc))
+                                              :phase :active :last-used-ms t
+                                              :surface/source src)
+                                 no-surf (-> (assoc-in [:lifecycle :policy] :eager)
+                                             (assoc :downgraded :no-surface))))))
                     id))
           specs)))
 
+(defn forget!
+  "Stop governing IDS entirely — the inverse of adopt!, for an addon being
+   plugged OUT. Withdraws any stubs advertised for them and drops their spec,
+   state and cached surface. Does NOT shut anything down: the caller tears the
+   addon down first. Returns the ids that were governed."
+  [mgr ids]
+  (let [res (with-lock mgr
+              (fn [m]
+                (let [governed (into [] (filter #(state m %)) ids)
+                      gone     (set ids)]
+                  (doseq [id governed]
+                    (r/rescue nil (lport/-remove-stubs! (:host m) id)))
+                  (swap! (:specs m) (fn [ss] (into [] (remove #(contains? gone (:addon/id %))) ss)))
+                  (swap! (:states m) #(apply dissoc % ids))
+                  (swap! (:surfaces m) #(apply dissoc % ids))
+                  governed)))]
+    (if (r/err? res) [] (:ok res))))
+
 (defn set-policy!
-  "Change ID's lifecycle at runtime (e.g. pin it). Returns the new Lifecycle."
-  [mgr id decl]
-  (-> (swap! (:states mgr) update-in [id :lifecycle] merge decl)
-      (get-in [id :lifecycle])))
+  "Change ID's lifecycle at runtime (e.g. pin it). Returns the new Lifecycle.
+
+   Making an addon :lazy that has no surface a stub could advertise is REFUSED
+   unless OPTS {:force? true}: the lifecycle is left as it was and returned with
+   :refused :no-surface, because a lazy surface-less addon, once evicted, could
+   never be woken again."
+  ([mgr id decl] (set-policy! mgr id decl {}))
+  ([mgr id decl {:keys [force?]}]
+   (if (and (not force?)
+            (= :lazy (:policy decl))
+            (not (policy/lazy-permitted? (first (surface-of mgr id)))))
+     (assoc (:lifecycle (state mgr id)) :refused :no-surface)
+     (-> (swap! (:states mgr) update-in [id :lifecycle] merge decl)
+         (get-in [id :lifecycle])))))
 
 ;; =============================================================================
 ;; Status and installation
@@ -463,8 +566,12 @@
 (defonce ^:private installed (atom nil))
 
 (defn install!
-  "Make MGR the installed manager and the source of the dormancy oracle."
+  "Make MGR the installed manager and the source of the dormancy oracle. MGR is
+   also SEATED: it becomes `current` for every Manager sharing its state, so a
+   host that swapped :host by assoc and re-installed is honoured by later calls.
+   Prefer reseat-host!, which does this under the manager lock."
   [mgr]
+  (some-> (:seat mgr) (reset! mgr))
   (reset! installed mgr)
   (oracle/install-dormancy! #(dormant? mgr %))
   mgr)
@@ -478,6 +585,74 @@
 (defn installed-manager [] @installed)
 
 ;; =============================================================================
+;; Re-seating on a new host
+;; =============================================================================
+
+(defn- dormant-ids
+  "Pure: the governed ids, in spec order, that are not mounted."
+  [specs states]
+  (into [] (comp (map :addon/id)
+                 (filter #(contains? #{:dormant :failed} (get-in states [% :phase]))))
+        specs))
+
+(defn- next-host
+  "The host to seat: HOST-FN itself when it already is an ILifecycleHost, else
+   (HOST-FN old-host)."
+  [host-fn old-host]
+  (if (satisfies? lport/ILifecycleHost host-fn) host-fn (host-fn old-host)))
+
+(defn- shares-state? [a b] (and a b (identical? (:lock a) (:lock b))))
+
+(defn- do-reseat! [m host-fn]
+  (let [h (r/try-effect (next-host host-fn (:host m)))]
+    (cond
+      (r/err? h)
+      {:ok? false :reseated? false :errors [(str "host-fn failed: " (:message h))]}
+
+      (not (satisfies? lport/ILifecycleHost (:ok h)))
+      {:ok? false :reseated? false :errors ["host-fn did not answer an ILifecycleHost"]}
+
+      :else
+      (let [seat  (or (:seat m) (atom nil))
+            nm    (assoc m :host (:ok h) :seat seat)
+            inst  (installed-manager)
+            inst? (or (nil? inst) (shares-state? inst m))
+            sw    @(:sweeper m)
+            ids   (dormant-ids @(:specs nm) @(:states nm))]
+        (reset! seat nm)
+        (when inst? (install! nm))
+        (when sw
+          (stop-sweeper! m)
+          (start-sweeper! nm {:interval-ms (:interval-ms sw)}))
+        (doseq [id ids] (install-stubs! nm id))
+        {:ok?            true
+         :reseated?      true
+         :installed?     (boolean inst?)
+         :sweeper-moved? (boolean sw)
+         :rearmed        (filterv #(some? (first (surface-of nm %))) ids)}))))
+
+(defn reseat-host!
+  "Govern MGR's addons through a new ILifecycleHost, in place. HOST-FN is the new
+   host, or (fn [old-host] new-host).
+
+   Under the manager lock it builds a Manager on the new host that SHARES MGR's
+   specs, states, surfaces, lock and sweeper, seats it (see `current`), installs
+   it when MGR's state is the installed one (or nothing is installed), moves a
+   running sweeper onto it and re-arms the stubs of every dormant addon on the
+   new host. The old host is not called. Every activation, eviction and forget!
+   resolves the seated manager once it holds the lock, so none that starts after
+   this returns can reach the old host, and none running when it is called is cut
+   short: the reseat waits for it.
+
+   Returns a ReseatReport (hive-addon.lifecycle.schema/ReseatReport); on success
+   (current mgr) is the new Manager."
+  [mgr host-fn]
+  (let [res (with-lock mgr #(do-reseat! % host-fn))]
+    (if (r/err? res)
+      {:ok? false :reseated? false :errors [(:message res)]}
+      (:ok res))))
+
+;; =============================================================================
 ;; A host over IMountHost, for tests and hosts without a tool surface
 ;; =============================================================================
 
@@ -486,8 +661,15 @@
   (-mount! [_ specs peers]
     (boundary/mount! {:ordered specs} mount-host (assoc mount-opts :peer-specs peers)))
   (-unmount! [_ id]
-    (let [td (boundary/teardown! mount-host [id])]
-      {:ok? (empty? (:errors td)) :errors (vec (:errors td))}))
+    ;; "Shut down ... and forget the instance": teardown, then plug out through
+    ;; the optional IMountUnregister port (a host without it keeps an inert
+    ;; entry, which the next mount! replaces).
+    (let [td (boundary/teardown! mount-host [id])
+          un (boundary/unregister! mount-host [id])
+          es (into (vec (:errors td)) (:errors un))]
+      {:ok? (empty? es) :errors es
+       :torn-down (vec (:torn-down td))
+       :teardown/data-preserved? (:teardown/data-preserved? td)}))
   (-install-stubs! [_ id s activate!]
     (swap! stubs assoc id {:surface s :activate! activate!})
     nil)

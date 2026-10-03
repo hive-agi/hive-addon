@@ -41,3 +41,38 @@
      Returns {:torn-down [id] :errors [string]}.")
   (-mount! [this plan host opts]
     "Run the mount pipeline over `plan`. Returns a MountReport."))
+
+;; Two OPTIONAL capabilities of a mount driver, each its own role-sized port
+;; (ISP). A driver that implements neither still remounts; it simply cannot
+;; refuse a doomed remount before teardown, nor put the previous instances back
+;; after one fails — and the RemountReport says so (:hot/down), instead of the
+;; caller having to know which driver it holds.
+
+(defprotocol IMountPreflight
+  "Validate a remount BEFORE anything is torn down."
+  (-preflight [this plan host opts]
+    "Check that every spec in `plan` could be mounted — licence gate and
+     constructor resolution — WITHOUT constructing, registering or initializing
+     anything. Returns a MountReport (the dry-run shape); :ok? false refuses the
+     remount while every live instance is still in place."))
+
+(defprotocol IMountRollback
+  "Remember what is running so a failed remount can put it back."
+  (-snapshot [this host ids]
+    "{id instance} for the `ids` that `host` currently holds, read BEFORE
+     teardown. Handed to -mount! as the :fallback-instance, so an addon whose
+     new instance fails is restored to its previous one, in order."))
+
+(defprotocol IHotDirs
+  "The source roots hive-hot tracks and watches — the one hive-hot capability a
+   plug IN / plug OUT needs. Owner-scoped: a dir stays tracked while an owner
+   other than the releasing one still claims it."
+  (-extend-dirs! [this req]
+    "Track and watch REQ {:dirs [dir] :owner any :no-reload #{sym}} without
+     resetting the change baseline. Returns hive-hot's ExtendInitReport
+     {:dirs [dir] :added [dir]}, or a hive-dsl err Result.")
+  (-remove-dirs! [this req]
+    "Release REQ {:dirs [dir] :owner any}. Returns hive-hot's RemoveDirsReport
+     {:removed [dir] :kept [dir] :absent [dir] :dirs [dir] :shared {dir [owner]}},
+     or a hive-dsl err Result. :kept holds a core dir or one another owner
+     still claims (then also under :shared)."))
