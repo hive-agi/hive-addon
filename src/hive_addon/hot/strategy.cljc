@@ -29,7 +29,8 @@
    hive-addon.hot.port/IMountDriver."
   (:require [hive-addon.hot.cascade :as cascade]
             [hive-addon.hot.port :as hport]
-            [hive-dsl.result :as r]))
+            [hive-dsl.result :as r]
+            [hive-addon.hot.report :as verdict]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -58,8 +59,12 @@
 ;; =============================================================================
 
 (defn- base-report
-  "The invariant skeleton every strategy's report shares. :teardown/data-preserved?
-   is true by construction — no strategy is permitted to delete data."
+  "The invariant skeleton every strategy's report shares.
+
+   :teardown/data-preserved? is COMPUTED (hive-addon.hot.report/data-preserved?)
+   from the teardown outcomes a strategy actually ran; the skeleton starts from
+   none, where nothing was released and so nothing can have been deleted. A
+   strategy that tears down folds its outcomes in with `with-teardowns`."
   [strategy-id ctx]
   {:hot/trigger (:hot/trigger ctx :manual)
    :hot/strategy strategy-id
@@ -68,9 +73,14 @@
    :hot/roots (vec (:hot/roots ctx []))
    :hot/affected []
    :hot/torn-down []
-   :teardown/data-preserved? true
+   :teardown/data-preserved? (verdict/data-preserved? [])
    :mounted []
    :ok? true})
+
+(defn- with-teardowns
+  "Fold the teardown OUTCOMES a strategy ran into REPORT's data-preserved? verdict."
+  [report outcomes]
+  (assoc report :teardown/data-preserved? (verdict/data-preserved? outcomes)))
 
 (defn- refusal
   "A report that declines to reload, without touching the running system."
@@ -156,6 +166,39 @@
     (seq (:multi-file ns-res))     (assoc :hot/multi-file (:multi-file ns-res))
     (contains? ns-res :unchanged?) (assoc :hot/ns-unchanged? (:unchanged? ns-res))))
 
+(defn- empty-reload-warning
+  "The sentence an empty reload reports. With no roots the cause is upstream of
+   the reloader: the seed's source dir never resolved, so there was nothing to
+   scope the reload to."
+  [roots]
+  (str "no namespace was reloaded; the mounted code is whatever was already loaded"
+       " (roots: " (pr-str (vec roots)) ")"
+       (when (empty? roots)
+         (str ". The seed's source dir was not resolved, so the reload had no root"
+              " to scan: check :hot/source-kind in `hot list`, or inject the addon"
+              " so its spec carries :hot/source-dirs"))))
+
+(defn- with-empty-reload
+  "Flag a reload whose OWN namespace pass loaded nothing.
+
+   The remount still rebuilt every instance, so the report stays :ok? \u2014 a
+   no-change remount is legitimate \u2014 but it must not read as new code: it gets
+   :hot/ns-empty-reload, a :hot/warnings line and a diagnostic. A reload driven
+   by the watcher (:hot/ns-reloaded? true) already had its namespaces loaded by
+   clj-reload and is never flagged."
+  [report ctx loaded]
+  (if (or (:hot/ns-reloaded? ctx) (seq loaded))
+    report
+    (let [warning (empty-reload-warning (:hot/roots ctx []))]
+      (cond-> (-> report
+                  (assoc :hot/ns-empty-reload true)
+                  (update :hot/warnings (fnil conj []) warning))
+        (nil? (:diagnostic report))
+        (assoc :diagnostic {:code :hot/empty-reload
+                            :retryable true
+                            :actions [{:tool "hot" :arguments {:command "list"}}]
+                            :message warning})))))
+
 (defn- stale-refusal
   "Refuse a reload whose namespace pass claimed more than it did: the image
    still holds the previous constructor, so remounting would rebuild from OLD
@@ -222,6 +265,37 @@
                        loaded)]
     [(into (set seeds) extra) extra]))
 
+(defn- preflight
+  "Run the driver's IMountPreflight over PLAN, when it has one. nil when the
+   driver cannot preflight (the remount then proceeds on rollback alone), else
+   the dry-run MountReport."
+  [driver plan host mount-opts]
+  (when (satisfies? hport/IMountPreflight driver)
+    (let [res (r/try-effect (hport/-preflight driver plan host mount-opts))]
+      (if (r/err? res)
+        {:mounted [] :ok? false :errors [(str "preflight threw: " (:message res))]}
+        (:ok res)))))
+
+(defn- preflight-refusal
+  "Refuse a remount whose preflight failed. Nothing has been torn down: every
+   live instance is still in place, so nothing is down."
+  [strategy-id ctx ids pre]
+  (-> (refusal strategy-id ctx
+               (into (vec (:errors pre)) (mount-errors pre)))
+      (assoc :hot/affected ids
+             :hot/refused? true
+             :hot/preflight (vec (:mounted pre))
+             :hot/restored []
+             :hot/down [])))
+
+(defn- snapshot
+  "{id instance} the driver can restore from, or {} for a driver without
+   IMountRollback."
+  [driver host ids]
+  (if (satisfies? hport/IMountRollback driver)
+    (or (r/rescue {} (hport/-snapshot driver host ids)) {})
+    {}))
+
 (defrecord RemountStrategy []
   IReloadStrategy
   (-strategy-id [_] :remount)
@@ -271,25 +345,44 @@
                                      plan)
                   ordered          (:ordered plan)
                   ids              (mapv :addon/id ordered)
-                  ;; Reverse-order shutdown, then re-drive the ORDINARY mount pipeline over
-                  ;; the affected slice. mount! re-resolves each constructor at call time,
-                  ;; so the freshly loaded code is what gets constructed. :peer-specs keeps
-                  ;; sibling injection resolving against the WHOLE system, not the slice.
-                  td               (hport/-teardown! driver host ids)
-                  report           (hport/-mount! driver plan host
-                                                  (assoc (:hot/mount-opts ctx {})
-                                                         :peer-specs specs))
-                  errors           (into (vec (:errors td)) (mount-errors report))]
-              (cond-> (-> (base-report (-strategy-id this) ctx)
-                          (assoc :hot/affected ids
-                                 :hot/torn-down (vec (:torn-down td))
-                                 :hot/ns-reloaded loaded
-                                 :mounted (vec (:mounted report))
-                                 :ok? (and (:ok? report) (empty? (:errors td))))
-                          (with-ns-outcome ns-res))
-                (seq widened)        (assoc :hot/widened widened)
-                (seq (:cycles plan)) (assoc :hot/cycles (:cycles plan))
-                (seq errors)         (assoc :errors (vec errors))))))))))
+                  mount-opts       (assoc (:hot/mount-opts ctx {}) :peer-specs specs)
+                  ;; Validate the new code BEFORE anything is torn down: a slice
+                  ;; whose constructors do not resolve, or that the licence gate
+                  ;; refuses, is refused with every live instance in place.
+                  pre              (preflight driver plan host mount-opts)]
+              (if (and pre (not (:ok? pre)))
+                (-> (preflight-refusal (-strategy-id this) ctx ids pre)
+                    (with-ns-outcome ns-res)
+                    (with-empty-reload ctx loaded))
+                ;; Remember what is running, then reverse-order shutdown, then
+                ;; re-drive the ORDINARY mount pipeline over the affected slice.
+                ;; mount! re-resolves each constructor at call time, so the
+                ;; freshly loaded code is what gets constructed. :peer-specs keeps
+                ;; sibling injection resolving against the WHOLE system, not the
+                ;; slice. A member whose new instance fails is put back to the
+                ;; snapshot IN ORDER (:fallback-instance), so its dependents
+                ;; receive a live sibling rather than a shut-down one.
+                (let [snap    (snapshot driver host ids)
+                      td      (hport/-teardown! driver host ids)
+                      report  (hport/-mount! driver plan host
+                                             (cond-> mount-opts
+                                               (seq snap) (assoc :fallback-instance
+                                                                 (comp snap :addon/id))))
+                      outcome (verdict/remount-outcome ids report)
+                      errors  (into (vec (:errors td)) (mount-errors report))]
+                  (cond-> (-> (base-report (-strategy-id this) ctx)
+                              (with-teardowns [td])
+                              (merge outcome)
+                              (assoc :hot/affected ids
+                                     :hot/torn-down (vec (:torn-down td))
+                                     :hot/ns-reloaded loaded
+                                     :mounted (vec (:mounted report))
+                                     :ok? (and (:ok? report) (empty? (:errors td))))
+                              (with-ns-outcome ns-res)
+                              (with-empty-reload ctx loaded))
+                    (seq widened)        (assoc :hot/widened widened)
+                    (seq (:cycles plan)) (assoc :hot/cycles (:cycles plan))
+                    (seq errors)         (assoc :errors (vec errors))))))))))))
 
 ;; =============================================================================
 ;; Built-in strategy: :restart-required
@@ -331,14 +424,16 @@
           ns-res (reload-namespaces! ctx [(:addon/init-ns spec)])
           stale  (when before
                    (stale-constructors before (constructor-roots ctx [spec])
-                                       (:loaded ns-res)))]
+                                       (:loaded ns-res)))
+          loaded (mapv str (:loaded ns-res))]
       (if (seq stale)
         (stale-refusal (-strategy-id this) ctx [id] ns-res stale)
         (cond-> (-> (base-report (-strategy-id this) ctx)
                     (assoc :hot/affected [id]
-                           :hot/ns-reloaded (mapv str (:loaded ns-res))
+                           :hot/ns-reloaded loaded
                            :ok? (:ok? ns-res))
                     (with-ns-outcome ns-res))
+          (:ok? ns-res)          (with-empty-reload ctx loaded)
           (seq (:errors ns-res)) (assoc :errors (vec (:errors ns-res))))))))
 
 ;; =============================================================================

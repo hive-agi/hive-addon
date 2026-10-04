@@ -36,7 +36,8 @@
             [hive-addon.hot.strategy :as strategy]
             [hive-addon.lifecycle.oracle :as oracle]
             [hive-dsl.result :as r]
-            [hive-addon.wire :as wire]))
+            [hive-addon.wire :as wire]
+            [hive-addon.hot.report :as verdict]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -140,9 +141,15 @@
 
 (defn- seed-roots
   "Classpath source dirs of the seed addons — what the namespace reload is
-   scoped to. Jar-backed and absent seeds contribute nothing."
+   scoped to. The dirs a seed spec CARRIES (:hot/source-dirs, stamped by
+   inject!) are unioned with the ones resolved from the classpath, so an
+   injected addon has roots even on a thread whose loader cannot see it.
+   Jar-backed and absent seeds without stamped dirs contribute nothing."
   [specs seeds]
-  (vec (source/watchable-dirs (filter #(contains? seeds (:addon/id %)) specs))))
+  (let [seed-specs (filter #(contains? seeds (:addon/id %)) specs)]
+    (vec (sort (into (set (source/watchable-dirs seed-specs))
+                     (comp (mapcat :hot/source-dirs) (map str))
+                     seed-specs)))))
 
 (defn- reload-ctx
   [host specs spec seeds {:keys [trigger changed-ns ns-reloaded? mount-opts
@@ -176,7 +183,8 @@
    :hot/seeds #{}
    :hot/affected []
    :hot/torn-down []
-   :teardown/data-preserved? true
+   ;; Nothing was released, so the verdict is computed over no teardowns.
+   :teardown/data-preserved? (verdict/data-preserved? [])
    :mounted []
    :ok? false
    :diagnostic (diagnostic/missing-addon addon-id)
@@ -192,30 +200,37 @@
    :hot/affected []
    :hot/torn-down []
    :hot/dormant (vec ids)
-   :teardown/data-preserved? true
+   :teardown/data-preserved? (verdict/data-preserved? [])
    :mounted []
    :ok? true})
 
 (defn- merge-reports
   "Fold per-strategy reports into one. Used when a single trigger seeds addons
    that resolve to different strategies — each group runs its own strategy and
-   the outcomes are reported together rather than one shadowing the others."
+   the outcomes are reported together rather than one shadowing the others.
+   Every verdict is folded, never re-asserted: data is preserved only if every
+   group says so, and what is restored or down is the union of the groups'."
   [reports opts]
   (if (= 1 (count reports))
     (first reports)
-    {:hot/trigger (or (:trigger opts) :manual)
-     :hot/strategy (if-let [ss (seq (distinct (map :hot/strategy reports)))]
-                     (if (= 1 (count ss)) (first ss) :hot/mixed)
-                     :hot/none)
-     :hot/changed-ns (:changed-ns opts)
-     :hot/seeds (into #{} (mapcat :hot/seeds) reports)
-     :hot/affected (into [] (comp (mapcat :hot/affected) (distinct)) reports)
-     :hot/torn-down (into [] (mapcat :hot/torn-down) reports)
-     :teardown/data-preserved? true
-     :mounted (into [] (mapcat :mounted) reports)
-     :ok? (every? :ok? reports)
-     :diagnostics (into [] (keep :diagnostic) reports)
-     :errors (into [] (mapcat #(or (:errors %) [])) reports)}))
+    (let [restored (into [] (mapcat :hot/restored) reports)
+          down     (into [] (mapcat :hot/down) reports)]
+      (cond-> {:hot/trigger (or (:trigger opts) :manual)
+               :hot/strategy (if-let [ss (seq (distinct (map :hot/strategy reports)))]
+                               (if (= 1 (count ss)) (first ss) :hot/mixed)
+                               :hot/none)
+               :hot/changed-ns (:changed-ns opts)
+               :hot/seeds (into #{} (mapcat :hot/seeds) reports)
+               :hot/affected (into [] (comp (mapcat :hot/affected) (distinct)) reports)
+               :hot/torn-down (into [] (mapcat :hot/torn-down) reports)
+               :teardown/data-preserved? (every? #(true? (:teardown/data-preserved? %)) reports)
+               :mounted (into [] (mapcat :mounted) reports)
+               :ok? (every? :ok? reports)
+               :diagnostics (into [] (keep :diagnostic) reports)
+               :errors (into [] (mapcat #(or (:errors %) [])) reports)}
+        (seq restored) (assoc :hot/restored restored)
+        (seq down)     (assoc :hot/down down)
+        (some #(contains? % :hot/restored?) reports) (assoc :hot/restored? (empty? down))))))
 
 ;; =============================================================================
 ;; Triggering a reload

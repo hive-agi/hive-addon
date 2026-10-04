@@ -16,7 +16,9 @@
             [hive-addon.mount :as mount]
             [hive-addon.mount.port :as port]
             [hive-dsl.result :as r]
-            [hive-addon.protocol :as proto]))
+            [hive-addon.protocol :as proto]
+            [hive-addon.hot.port :as hport]
+            [hive-addon.hot.mount-driver]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -281,6 +283,85 @@
       (testing "and no data was deleted"
         (is (true? (:teardown/data-preserved? report)))))))
 
+;; =============================================================================
+;; Safe remount — validate before teardown, restore on failure, report truthfully
+;; =============================================================================
+
+(defrecord TeardownMountOnlyDriver [inner]
+  ;; A driver with ONLY the IMountDriver capability — no preflight, no
+  ;; rollback. Delegates to the real driver, so the only difference is the
+  ;; capabilities it advertises (the LSP leg: the strategy must not need to
+  ;; know which one it holds; the report must say what became of the slice).
+  hport/IMountDriver
+  (-teardown! [_ host ids] (hport/-teardown! inner host ids))
+  (-mount! [_ plan host opts] (hport/-mount! inner plan host opts)))
+
+(defrecord UnclaimedTeardownDriver [inner]
+  ;; Fault-injecting decorator: releases, but makes NO data-preservation claim.
+  hport/IMountDriver
+  (-teardown! [_ host ids] (dissoc (hport/-teardown! inner host ids) :teardown/data-preserved?))
+  (-mount! [_ plan host opts] (hport/-mount! inner plan host opts)))
+
+(deftest a-remount-whose-constructor-cannot-resolve-is-refused-before-teardown
+  (let [[host _] (mount-chain! [spec-a spec-b])
+        specs    [(spec "probe.a" "no-such-constructor") spec-b]
+        report   (hot/reload-addon! host specs "probe.a" {:reload-ns! (fn [_] {:loaded []})})]
+    (is (false? (:ok? report)))
+    (is (true? (:hot/refused? report)))
+    (testing "nothing was torn down: every live instance is still the original"
+      (is (empty? (:hot/torn-down report)))
+      (is (empty? (fx/events-of :shutdown)))
+      (is (= [1 1] (mapv #(generation-of host %) ["probe.a" "probe.b"]))))
+    (testing "and so nothing is down"
+      (is (= [] (:hot/down report))))
+    (is (seq (:hot/preflight report)))
+    (is (nil? (hs/humanize-errors hs/RemountReport report))
+        (pr-str (hs/humanize-errors hs/RemountReport report)))))
+
+(deftest a-remount-whose-constructor-throws-restores-the-previous-instance
+  (let [[host _] (mount-chain! [spec-a spec-b])
+        specs    [(spec "probe.a" "make-broken") spec-b]
+        report   (hot/reload-addon! host specs "probe.a" {:reload-ns! (fn [_] {:loaded []})})]
+    (is (false? (:ok? report)) "the NEW code did not mount")
+    (testing "the previous instance is live again"
+      (is (= ["probe.a"] (:hot/restored report)))
+      (is (= [] (:hot/down report)))
+      (is (true? (:hot/restored? report)))
+      (is (= 1 (generation-of host "probe.a")))
+      (is (= 2 (count (filter (fn [[_ id gen _]] (and (= "probe.a" id) (= 1 gen)))
+                              (fx/events-of :init))))
+          "re-initialized after its teardown"))
+    (testing "restored IN ORDER, so its dependent was rebuilt with it injected"
+      (is (= 2 (generation-of host "probe.b")))
+      (let [[_ _ _ deps] (last (filter (fn [[_ id _ _]] (= "probe.b" id)) (fx/events-of :init)))]
+        (is (= #{"probe.a"} deps))))
+    (is (true? (:teardown/data-preserved? report)))
+    (is (nil? (hs/humanize-errors hs/RemountReport report))
+        (pr-str (hs/humanize-errors hs/RemountReport report)))))
+
+(deftest a-driver-that-cannot-roll-back-reports-the-addon-down
+  (let [[host _] (mount-chain! [spec-a])
+        specs    [(spec "probe.a" "make-broken")]
+        report   (hot/reload-addon! host specs "probe.a"
+                                    {:reload-ns! (fn [_] {:loaded []})
+                                     :mount-driver (->TeardownMountOnlyDriver
+                                                    (hive-addon.hot.mount-driver/mount-driver))})]
+    (is (false? (:ok? report)))
+    (is (= [] (:hot/restored report)))
+    (is (= ["probe.a"] (:hot/down report)))
+    (is (false? (:hot/restored? report)))))
+
+(deftest data-preserved-is-computed-from-the-teardown-not-asserted
+  (let [[host _] (mount-chain! [spec-a])
+        report   (hot/reload-addon! host [spec-a] "probe.a"
+                                    {:reload-ns! (fn [_] {:loaded []})
+                                     :mount-driver (->UnclaimedTeardownDriver
+                                                    (hive-addon.hot.mount-driver/mount-driver))})]
+    (is (:ok? report) (pr-str (:errors report)))
+    (is (= ["probe.a"] (:hot/torn-down report)))
+    (is (false? (:teardown/data-preserved? report))
+        "a release that makes no preservation claim is not evidence of preservation")))
+
 (deftest reload-all-rebuilds-every-addon-in-order
   (let [[host _] (mount-chain!)
         report   (hot/reload-all! host chain-specs)]
@@ -390,6 +471,98 @@
       (is (not (contains? (set (:hot/affected report)) "probe.out")))
       (testing "an addon nothing reloaded keeps the instance it had"
         (is (= 1 (generation-of host "probe.out")))))))
+
+;; =============================================================================
+;; An empty reload is loud — "remounted" must never read as "new code"
+;; =============================================================================
+
+(deftest a-manual-reload-that-loads-nothing-says-so
+  (testing "the reloader answered no namespace: the remount rebuilt the instances
+            from whatever code was already loaded, and the report must SAY that
+            rather than read as a successful reload of new code"
+    (let [[host _] (mount-chain!)
+          report   (hot/reload-addon! host chain-specs "probe.a"
+                                      {:reload-ns! (fn [_] {:loaded []})})]
+      (testing "a no-change remount is not a hard failure"
+        (is (:ok? report) (pr-str (:errors report)))
+        (is (= 2 (generation-of host "probe.a"))))
+      (is (true? (:hot/ns-empty-reload report)))
+      (is (= [] (:hot/ns-reloaded report)))
+      (is (some #(re-find #"no namespace was reloaded" %) (:hot/warnings report))
+          (pr-str (:hot/warnings report)))
+      (testing "and a diagnostic names the condition"
+        (is (= :hot/empty-reload (get-in report [:diagnostic :code]))))
+      (is (nil? (hs/humanize-errors hs/RemountReport report))
+          (pr-str (hs/humanize-errors hs/RemountReport report))))))
+
+(deftest an-empty-reload-without-roots-blames-the-source-dir
+  (testing "a seed whose source dir did not resolve has nothing to scope the
+            reload to — the warning must point at THAT, not at the code"
+    (let [orphan (spec "probe.orphan" "make-shared"
+                       :addon/init-ns "definitely.not.on.the.classpath"
+                       :addon/config {:probe/id "probe.orphan"})
+          host   (mount/atom-mount-host)
+          report (hot/reload-addon! host [orphan] "probe.orphan"
+                                    {:reload-ns! (fn [_] {:loaded []})
+                                     :strategies [(strategy/->RemountStrategy)]})]
+      (is (= [] (:hot/roots report)))
+      (is (true? (:hot/ns-empty-reload report)))
+      (is (some #(re-find #"source dir" %) (:hot/warnings report))
+          (pr-str (:hot/warnings report))))))
+
+(deftest a-watcher-reload-is-not-flagged-empty
+  (testing ":ns-reloaded? true — clj-reload already loaded the namespace, so the
+            strategy's own pass is legitimately skipped"
+    (let [[host _] (mount-chain!)
+          report   (hot/reload-namespace! host chain-specs fixture-ns
+                                          {:reload-ns! (fn [_] {:loaded []})})]
+      (is (:ok? report) (pr-str (:errors report)))
+      (is (nil? (:hot/ns-empty-reload report)))
+      (is (empty? (:hot/warnings report))))))
+
+(deftest a-reload-that-loads-something-is-not-flagged-empty
+  (let [[host _] (mount-chain!)
+        report   (hot/reload-addon! host chain-specs "probe.a"
+                                    {:reload-ns! (fn [_] {:loaded [fixture-ns]})})]
+    (is (:ok? report) (pr-str (:errors report)))
+    (is (nil? (:hot/ns-empty-reload report)))
+    (is (empty? (:hot/warnings report)))))
+
+(deftest an-in-place-reload-that-loads-nothing-says-so
+  (let [s        (spec "probe.a" "make-a" :addon/reload-strategy :in-place)
+        [host _] (mount-chain! [s])
+        report   (hot/reload-addon! host [s] "probe.a"
+                                    {:reload-ns! (fn [_] {:loaded []})})]
+    (is (= :in-place (:hot/strategy report)))
+    (is (:ok? report) (pr-str (:errors report)))
+    (is (true? (:hot/ns-empty-reload report)))
+    (is (some #(re-find #"no namespace was reloaded" %) (:hot/warnings report)))
+    (is (nil? (hs/humanize-errors hs/RemountReport report))
+        (pr-str (hs/humanize-errors hs/RemountReport report)))))
+
+(deftest stamped-source-dirs-make-a-spec-reloadable-off-the-classpath
+  (testing "an injected addon whose source the calling thread's loader cannot
+            see still resolves as :directory through the dirs stamped on its spec"
+    (let [root (doto (java.io.File. (System/getProperty "java.io.tmpdir")
+                                    (str "hive-addon-stamped-" (System/nanoTime)))
+                 .mkdirs)
+          root-path (.getCanonicalPath root)
+          f    (java.io.File. root "stamped_probe/ctor.clj")]
+      (try
+        (.mkdirs (.getParentFile f))
+        (spit f "(ns stamped-probe.ctor)\n")
+        (let [s   (spec "probe.stamped" "make"
+                        :addon/init-ns "stamped-probe.ctor"
+                        :hot/source-dirs [root-path])
+              src (source/spec-source s)]
+          (is (= :directory (:hot/source-kind src)))
+          (is (true? (:hot/reloadable? src)))
+          (is (= root-path (:hot/source-dir src)))
+          (is (= #{root-path} (source/watchable-dirs [s]))))
+        (testing "without the stamp the same namespace is absent"
+          (is (= :absent (:hot/source-kind (source/resolve-source "stamped-probe.ctor")))))
+        (finally
+          (.delete f) (.delete (.getParentFile f)) (.delete root))))))
 
 (deftest reloaded-namespaces-are-reported-as-strings-whatever-the-reloader-answers
   (testing "clj-reload answers with SYMBOLS while :addon/init-ns and the report
