@@ -1,5 +1,6 @@
 (ns hive-addon.hot.inject
-  "Inject an addon that was NOT on the classpath when the host booted.
+  "Plug an addon IN that was NOT on the classpath when the host booted — and
+   plug it back OUT.
 
    `inject!` is the mount pipeline run over a slice that did not exist yet:
    put the addon's paths on the live classpath, discover the manifests under
@@ -8,7 +9,15 @@
    new specs against the peers already mounted, tear down the mounted
    dependents that now have a new sibling to receive, mount the slice through
    the ordinary IMountDriver, and register the new addons with hive-hot so
-   they reload like the rest.
+   they reload like the rest. Every injected addon that mounts is REMEMBERED
+   in the injected-spec registry (hive-addon.mount.injected), which classpath
+   discovery unions in, so it stays discoverable from any thread; and it is
+   ADOPTED by the installed lifecycle manager under its manifest policy.
+
+   `eject!` is the inverse: teardown, unregister through the optional
+   IMountUnregister port, un-govern, un-hot, stop watching the dirs nobody else
+   needs, forget the registry entry — and REPORT what cannot be removed (the
+   classpath URLs a URLClassLoader cannot drop, the namespaces still loaded).
 
    Classpath extension is a JVM concern: the URL is added to the highest
    DynamicClassLoader above the calling thread's context loader, which is the
@@ -22,12 +31,17 @@
    clojure.repl.deps/add-libs first (needs a tools.deps basis in the image)."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
+            [clojure.string :as str]
             [hive-addon.hot :as hot]
             [hive-addon.hot.cascade :as cascade]
+            [hive-addon.hot.dirs :as dirs]
             [hive-addon.hot.mount-driver :as driver]
             [hive-addon.hot.port :as hport]
+            [hive-addon.hot.report :as verdict]
             [hive-addon.hot.source :as source]
+            [hive-addon.lifecycle :as lc]
             [hive-addon.mount.boundary :as boundary]
+            [hive-addon.mount.injected :as injected]
             [hive-addon.mount.port :as port]
             [hive-dsl.result :as r])
   (:import [clojure.lang DynamicClassLoader RT]
@@ -140,15 +154,23 @@
 ;; =============================================================================
 
 (defn- hot-extend-dirs!
-  "Hand `dirs` to hive-hot's `extend-init!` so the new addons are tracked and
-   watched without resetting the baseline. Silent without hive-hot."
-  [dirs]
-  (if-let [extend! (r/rescue nil (requiring-resolve 'hive-hot.core/extend-init!))]
-    (let [res (r/try-effect (extend! {:dirs (vec dirs) :no-reload hot/no-reload}))]
-      (if (r/err? res)
-        {:added [] :error (:message res)}
-        (select-keys (:ok res) [:added :dirs])))
-    {:added []}))
+  "Claim each fresh addon's source dirs in hive-hot, through the IHotDirs port,
+   under that addon's id as OWNER — so a later eject! releases exactly its own
+   claim and a dir another addon still claims stays watched. Tracks without
+   resetting the baseline. {:added [dir] :error string?}"
+  [hot-dirs fresh]
+  (reduce (fn [acc spec]
+            (let [dirs (vec (source/watchable-dirs [spec]))
+                  res  (if (seq dirs)
+                         (hport/-extend-dirs! hot-dirs {:dirs dirs
+                                                        :owner (:addon/id spec)
+                                                        :no-reload hot/no-reload})
+                         (r/ok {:added []}))]
+              (if (r/err? res)
+                (cond-> acc (not (:error acc)) (assoc :error (:message res)))
+                (update acc :added into (:added (:ok res))))))
+          {:added []}
+          fresh))
 
 (defn- base-report
   [path paths]
@@ -162,7 +184,8 @@
    :hot/torn-down []
    :hot/dirs-added []
    :hot/registered []
-   :teardown/data-preserved? true
+   ;; Computed over the teardowns that ran — none yet.
+   :teardown/data-preserved? (verdict/data-preserved? [])
    :mounted []
    :ok? true})
 
@@ -179,6 +202,29 @@
     (cond-> spec
       (seq dirs) (assoc :hot/source-dirs dirs))))
 
+(defn- remember-injected!
+  "Record the injected specs that actually MOUNTED in the injected-spec registry,
+   so classpath discovery from any thread keeps seeing them. Returns the ids."
+  [mounted-specs path paths cp dirs]
+  (injected/remember!
+   (mapv (fn [spec]
+           {:addon/id (:addon/id spec)
+            :spec spec
+            :hot/path path
+            :hot/paths (vec paths)
+            :hot/classpath (mapv :url cp)
+            :hot/dirs (vec (source/watchable-dirs [spec]))})
+         mounted-specs)))
+
+(defn- adopt-into-lifecycle!
+  "Hand the mounted injected specs to the INSTALLED lifecycle manager, read
+   through its var at call time, so they are governed under their manifest
+   policy like every booted addon. [] when no manager is installed."
+  [mounted-specs]
+  (if-let [mgr (lc/installed-manager)]
+    (vec (r/rescue [] (lc/adopt! mgr mounted-specs)))
+    []))
+
 (defn inject!
   "Mount the addons whose manifests live under `path` into the running `host`,
    alongside `specs` — the MountSpecs already mounted (the reload bridge's
@@ -192,6 +238,11 @@
    :hot/specs: the host keeps THOSE as the addon's effective specs, so a later
    reload is scoped to the injected source on any thread.
 
+   Every injected addon that mounts is REMEMBERED in the injected-spec registry
+   (hive-addon.mount.injected), so discovery from any thread keeps seeing it,
+   and ADOPTED by the installed lifecycle manager (when one is installed) under
+   its manifest policy. `eject!` reverses both.
+
    opts: {:mount-opts    forwarded to mount! (e.g. :resolve-config); the keys
                          in hive-addon.hot/mount-opt-keys are folded in from
                          the top level as well
@@ -199,7 +250,10 @@
           :mount-driver  IMountDriver override
           :loader        DynamicClassLoader override
           :resolve-deps? hand the project's :deps to add-libs first
-          :hot?          register the new addons with hive-hot (default true)}
+          :hot?          register the new addons with hive-hot (default true)
+          :hot-dirs      IHotDirs override (default: the hive-hot adapter);
+                         each fresh addon claims its dirs under its own id
+          :govern?       adopt into the installed lifecycle manager (default true)}
 
    Returns an InjectReport. Never throws; every failure is in the report."
   [host specs path & [opts]]
@@ -243,18 +297,22 @@
                              (hport/-teardown! driver host remounted)
                              {:torn-down []})
                 report     (hport/-mount! driver plan host (assoc mount-opts :peer-specs all))
+                up         (into #{} (comp (filter :success?) (map :addon/id)) (:mounted report))
+                up-fresh   (filterv #(contains? up (:addon/id %)) fresh)
+                remembered (remember-injected! up-fresh path paths cp
+                                               (source/watchable-dirs up-fresh))
+                adopted    (if (:govern? opts true) (adopt-into-lifecycle! up-fresh) [])
                 hot-report (when (:hot? opts true)
                              (hot/hot! host all {:mount-opts mount-opts
                                                  :solve-opts (:solve-opts opts {})}))
-                dirs       (source/watchable-dirs fresh)
-                dirs-added (if (and (:hot? opts true) (seq dirs))
-                             (hot-extend-dirs! dirs)
+                dirs-added (if (:hot? opts true)
+                             (hot-extend-dirs! (or (:hot-dirs opts) (dirs/hot-dirs)) up-fresh)
                              {:added []})
                 errors     (cond-> (vec (:errors td))
                              true (into (comp (remove :success?)
                                               (map (fn [{:keys [addon/id errors phase]}]
                                                      (str id ": " (if (seq errors)
-                                                                    (clojure.string/join "; " errors)
+                                                                    (str/join "; " errors)
                                                                     (str "failed at phase " phase))))))
                                         (:mounted report))
                              (:error dirs-added) (conj (str "hive-hot extend-init!: " (:error dirs-added))))]
@@ -265,6 +323,189 @@
                            :mounted (vec (:mounted report))
                            :hot/dirs-added (vec (:added dirs-added))
                            :hot/registered (mapv :addon/id (:hot/registered hot-report))
+                           :hot/remembered (vec remembered)
+                           :hot/adopted adopted
+                           :teardown/data-preserved? (verdict/data-preserved? [td])
                            :ok? (and (:ok? report) (empty? (:errors td))))
               (seq (:missing plan)) (assoc :hot/missing (:missing plan))
               (seq errors)          (assoc :errors errors))))))))
+
+;; =============================================================================
+;; eject! — plug OUT: the inverse of inject!
+;; =============================================================================
+
+(defn- target-ids
+  "The addon ids TARGET names. TARGET is an addon id, a collection of ids, or
+   the path something was injected from (every id remembered for that path).
+   Pure over the injected ENTRIES."
+  [entries target]
+  (cond
+    (coll? target) (vec (distinct target))
+    :else
+    (let [canon  (r/rescue (str target) (str (.getCanonicalFile (io/file (str target)))))
+          by-path (injected/entries-for-path entries canon)]
+      (if (seq by-path)
+        (mapv :addon/id by-path)
+        [(str target)]))))
+
+(defn- hot-remove-dirs!
+  "Release, through the IHotDirs port, each ejected addon's claim on the RELEASED
+   dirs it lives under (one remove-dirs! request per owner), and fold hive-hot's
+   RemoveDirsReports with hive-addon.hot.report/dirs-outcome.
+   {:removed [..] :retained [..] :shared {dir [owner]} :reason string?}"
+  [hot-dirs released dirs-by-id]
+  (let [reqs (into [] (keep (fn [[id ds]]
+                              (let [ds (filterv (set released) ds)]
+                                (when (seq ds) {:dirs ds :owner id}))))
+                   dirs-by-id)]
+    (if (empty? reqs)
+      {:removed [] :retained [] :shared {}}
+      (verdict/dirs-outcome reqs (mapv #(hport/-remove-dirs! hot-dirs %) reqs)))))
+
+(defn- eject-base
+  [target ids]
+  {:hot/target target
+   :hot/ejected (vec ids)
+   :hot/torn-down []
+   :hot/unregistered []
+   :hot/unsupported []
+   :hot/ungoverned []
+   :hot/unhot []
+   :hot/forgotten []
+   :hot/dirs-removed []
+   :hot/dirs-retained []
+   :hot/classpath-retained []
+   :hot/namespaces-retained []
+   :teardown/data-preserved? (verdict/data-preserved? [])
+   :ok? true})
+
+(defn eject!
+  "Plug the addons TARGET names OUT of the running `host` — the inverse of
+   inject!. `specs` are the MountSpecs currently mounted (the same set inject!
+   takes); TARGET is an addon id, a collection of ids, or the path they were
+   injected from.
+
+   In order: tear the addons down (reverse dependency order, through the
+   IMountDriver), unregister them through the optional IMountUnregister port,
+   stop the installed lifecycle manager governing them, deregister them from
+   hive-hot, stop watching the source dirs no surviving addon still needs, and
+   forget them in the injected-spec registry.
+
+   An addon other MOUNTED addons depend on is REFUSED (:hot/refused? true,
+   :hot/blocking) unless opts {:cascade? true}, which also tears those
+   dependents down and remounts them WITHOUT the ejected sibling.
+
+   What cannot be removed is REPORTED, not hidden: classpath URLs stay on the
+   DynamicClassLoader (a URLClassLoader cannot drop one), loaded namespaces stay
+   in the image, and a host without IMountUnregister keeps an inert entry.
+
+   Source dirs go through the IHotDirs port (:hot-dirs, default the hive-hot
+   adapter): each ejected addon releases its OWN claim, and what hive-hot keeps
+   (a core dir, or one another owner claims) is reported under
+   :hot/dirs-retained / :hot/dirs-shared.
+
+   opts: {:cascade? :mount-driver :hot-dirs :mount-opts :solve-opts} (+ the
+   hive-addon.hot/mount-opt-keys folded in from the top level).
+   Returns an EjectReport. Never throws. See `plug-out!` for the Result form."
+  [host specs target & [opts]]
+  (let [opts      (or opts {})
+        entries   (injected/entries)
+        ids       (target-ids entries target)
+        by-id     (into {} (map (juxt :addon/id identity)) (concat (map :spec entries) specs))
+        known     (filterv #(or (by-id %) (some? (r/rescue nil (port/registered host %)))) ids)
+        unknown   (filterv (complement (set known)) ids)
+        base      (cond-> (eject-base target known)
+                    (seq unknown) (assoc :hot/unknown unknown))
+        gone      (set known)
+        mounted   (vec specs)
+        closure   (cascade/dependents mounted gone (:solve-opts opts {}))
+        blocking  (vec (sort (remove gone closure)))]
+    (cond
+      (empty? known)
+      (assoc base :ok? false :errors [(str "nothing to eject for " (pr-str target))])
+
+      (and (seq blocking) (not (:cascade? opts)))
+      (assoc base :ok? false :hot/refused? true :hot/blocking blocking
+             :errors [(str "mounted addons depend on " (pr-str (vec (sort known)))
+                           ": " (pr-str blocking) " — pass :cascade? true to remount them without it")])
+
+      :else
+      (let [driver     (or (:mount-driver opts) (driver/mount-driver))
+            ejected    (keep by-id known)
+            remaining  (into [] (remove #(contains? gone (:addon/id %))) mounted)
+            ;; Tear the dependents AND the ejected down in one reverse-order pass.
+            order      (mapv :addon/id (:ordered (cascade/affected-plan
+                                                  (into remaining ejected)
+                                                  (into gone blocking)
+                                                  (:solve-opts opts {}))))
+            td         (hport/-teardown! driver host (if (seq order) order known))
+            un         (boundary/unregister! host known)
+            mgr        (lc/installed-manager)
+            ungoverned (if mgr (vec (r/rescue [] (lc/forget! mgr known))) [])
+            unhot      (hot/unhot! ejected)
+            entries-of (into [] (keep injected/entry) known) ; read BEFORE forget!
+            dirs-by-id (into [] (map (fn [id]
+                                       [id (vec (distinct
+                                                 (concat (:hot/dirs (some #(when (= id (:addon/id %)) %) entries-of))
+                                                         (some->> (by-id id) vector source/watchable-dirs))))]))
+                             known)
+            released   (verdict/released-dirs (mapcat second dirs-by-id)
+                                              (source/watchable-dirs remaining))
+            removed    (hot-remove-dirs! (or (:hot-dirs opts) (dirs/hot-dirs)) released dirs-by-id)
+            forgotten  (injected/forget! known)
+            ;; Dependents come back without the ejected sibling.
+            remount    (when (seq blocking)
+                         (let [plan (cascade/affected-plan remaining (set blocking) (:solve-opts opts {}))
+                               mopts (merge (select-keys opts hot/mount-opt-keys)
+                                            (:mount-opts opts {})
+                                            {:peer-specs remaining})]
+                           (hport/-mount! driver plan host mopts)))
+            errors     (cond-> (into (vec (:errors td)) (:errors un))
+                         remount (into (comp (remove :success?)
+                                             (map #(str (:addon/id %) ": remount without "
+                                                        (pr-str (vec (sort known))) " failed")))
+                                       (:mounted remount)))]
+        (cond-> (assoc base
+                       :hot/torn-down (vec (:torn-down td))
+                       :hot/unregistered (vec (:unregistered un))
+                       :hot/unsupported (vec (:unsupported un))
+                       :hot/ungoverned ungoverned
+                       :hot/unhot (vec (:hot/unregistered unhot))
+                       :hot/forgotten forgotten
+                       :hot/dirs-removed (:removed removed)
+                       :hot/dirs-retained (:retained removed)
+                       :hot/classpath-retained (vec (distinct (mapcat :hot/classpath entries-of)))
+                       :hot/namespaces-retained (vec (sort (distinct (keep (comp #(some-> % str) :addon/init-ns)
+                                                                           ejected))))
+                       :teardown/data-preserved? (verdict/data-preserved? [td])
+                       :ok? (and (empty? errors) (or (nil? remount) (:ok? remount))))
+          (:reason removed)        (assoc :hot/dirs-reason (:reason removed))
+          (seq (:shared removed))  (assoc :hot/dirs-shared (:shared removed))
+          remount           (assoc :hot/remounted blocking :mounted (vec (:mounted remount)))
+          (seq errors)      (assoc :errors errors))))))
+
+;; =============================================================================
+;; plug-out! — eject! on the railway
+;; =============================================================================
+
+(defn plug-out!
+  "`eject!` as a hive-dsl Result, for callers composing on the railway.
+
+   (r/ok EjectReport) when the addons are out. An UNSAFE or impossible eject is
+   refused LOUDLY, as an err Result carrying the whole report:
+     :hot/eject-refused  mounted addons depend on the target (see :hot/blocking;
+                         nothing was touched — pass {:cascade? true})
+     :hot/eject-unknown  nothing by that name is mounted or injected
+     :hot/eject-failed   the eject ran but a step failed (see :errors)
+   Each err has :message. Never throws."
+  [host specs target & [opts]]
+  (let [report (eject! host specs target opts)]
+    (cond
+      (:ok? report) (r/ok report)
+      (:hot/refused? report)
+      (r/err :hot/eject-refused (assoc report :message (first (:errors report))))
+      (empty? (:hot/ejected report))
+      (r/err :hot/eject-unknown (assoc report :message (first (:errors report))))
+      :else
+      (r/err :hot/eject-failed
+             (assoc report :message (str/join "; " (:errors report)))))))

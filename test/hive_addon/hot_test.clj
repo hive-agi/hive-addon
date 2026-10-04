@@ -16,7 +16,9 @@
             [hive-addon.mount :as mount]
             [hive-addon.mount.port :as port]
             [hive-dsl.result :as r]
-            [hive-addon.protocol :as proto]))
+            [hive-addon.protocol :as proto]
+            [hive-addon.hot.port :as hport]
+            [hive-addon.hot.mount-driver]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -280,6 +282,85 @@
         (is (seq (:errors report))))
       (testing "and no data was deleted"
         (is (true? (:teardown/data-preserved? report)))))))
+
+;; =============================================================================
+;; Safe remount — validate before teardown, restore on failure, report truthfully
+;; =============================================================================
+
+(defrecord TeardownMountOnlyDriver [inner]
+  ;; A driver with ONLY the IMountDriver capability — no preflight, no
+  ;; rollback. Delegates to the real driver, so the only difference is the
+  ;; capabilities it advertises (the LSP leg: the strategy must not need to
+  ;; know which one it holds; the report must say what became of the slice).
+  hport/IMountDriver
+  (-teardown! [_ host ids] (hport/-teardown! inner host ids))
+  (-mount! [_ plan host opts] (hport/-mount! inner plan host opts)))
+
+(defrecord UnclaimedTeardownDriver [inner]
+  ;; Fault-injecting decorator: releases, but makes NO data-preservation claim.
+  hport/IMountDriver
+  (-teardown! [_ host ids] (dissoc (hport/-teardown! inner host ids) :teardown/data-preserved?))
+  (-mount! [_ plan host opts] (hport/-mount! inner plan host opts)))
+
+(deftest a-remount-whose-constructor-cannot-resolve-is-refused-before-teardown
+  (let [[host _] (mount-chain! [spec-a spec-b])
+        specs    [(spec "probe.a" "no-such-constructor") spec-b]
+        report   (hot/reload-addon! host specs "probe.a" {:reload-ns! (fn [_] {:loaded []})})]
+    (is (false? (:ok? report)))
+    (is (true? (:hot/refused? report)))
+    (testing "nothing was torn down: every live instance is still the original"
+      (is (empty? (:hot/torn-down report)))
+      (is (empty? (fx/events-of :shutdown)))
+      (is (= [1 1] (mapv #(generation-of host %) ["probe.a" "probe.b"]))))
+    (testing "and so nothing is down"
+      (is (= [] (:hot/down report))))
+    (is (seq (:hot/preflight report)))
+    (is (nil? (hs/humanize-errors hs/RemountReport report))
+        (pr-str (hs/humanize-errors hs/RemountReport report)))))
+
+(deftest a-remount-whose-constructor-throws-restores-the-previous-instance
+  (let [[host _] (mount-chain! [spec-a spec-b])
+        specs    [(spec "probe.a" "make-broken") spec-b]
+        report   (hot/reload-addon! host specs "probe.a" {:reload-ns! (fn [_] {:loaded []})})]
+    (is (false? (:ok? report)) "the NEW code did not mount")
+    (testing "the previous instance is live again"
+      (is (= ["probe.a"] (:hot/restored report)))
+      (is (= [] (:hot/down report)))
+      (is (true? (:hot/restored? report)))
+      (is (= 1 (generation-of host "probe.a")))
+      (is (= 2 (count (filter (fn [[_ id gen _]] (and (= "probe.a" id) (= 1 gen)))
+                              (fx/events-of :init))))
+          "re-initialized after its teardown"))
+    (testing "restored IN ORDER, so its dependent was rebuilt with it injected"
+      (is (= 2 (generation-of host "probe.b")))
+      (let [[_ _ _ deps] (last (filter (fn [[_ id _ _]] (= "probe.b" id)) (fx/events-of :init)))]
+        (is (= #{"probe.a"} deps))))
+    (is (true? (:teardown/data-preserved? report)))
+    (is (nil? (hs/humanize-errors hs/RemountReport report))
+        (pr-str (hs/humanize-errors hs/RemountReport report)))))
+
+(deftest a-driver-that-cannot-roll-back-reports-the-addon-down
+  (let [[host _] (mount-chain! [spec-a])
+        specs    [(spec "probe.a" "make-broken")]
+        report   (hot/reload-addon! host specs "probe.a"
+                                    {:reload-ns! (fn [_] {:loaded []})
+                                     :mount-driver (->TeardownMountOnlyDriver
+                                                    (hive-addon.hot.mount-driver/mount-driver))})]
+    (is (false? (:ok? report)))
+    (is (= [] (:hot/restored report)))
+    (is (= ["probe.a"] (:hot/down report)))
+    (is (false? (:hot/restored? report)))))
+
+(deftest data-preserved-is-computed-from-the-teardown-not-asserted
+  (let [[host _] (mount-chain! [spec-a])
+        report   (hot/reload-addon! host [spec-a] "probe.a"
+                                    {:reload-ns! (fn [_] {:loaded []})
+                                     :mount-driver (->UnclaimedTeardownDriver
+                                                    (hive-addon.hot.mount-driver/mount-driver))})]
+    (is (:ok? report) (pr-str (:errors report)))
+    (is (= ["probe.a"] (:hot/torn-down report)))
+    (is (false? (:teardown/data-preserved? report))
+        "a release that makes no preservation claim is not evidence of preservation")))
 
 (deftest reload-all-rebuilds-every-addon-in-order
   (let [[host _] (mount-chain!)

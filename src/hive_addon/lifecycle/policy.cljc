@@ -9,7 +9,8 @@
 
    Portable stratum: no reader conditionals, no `for`, only self-evaluating
    `:or` defaults (see hive-addon.mount.solve)."
-  (:require [hive-addon.mount.solve :as solve]))
+  (:require [hive-addon.mount.solve :as solve]
+            [hive-addon.lifecycle.surface :as surface]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -138,18 +139,37 @@
 ;; Sweep
 ;; =============================================================================
 
+(def keep-rules
+  "Why a sweep KEEPS an addon, as an ordered rule table: [KeepReason keep?]
+   where (keep? now state) answers true to keep it for that reason. The first
+   rule that fires names the reason; an addon no rule keeps may be evicted on
+   its own merits.
+
+   Data, so a new reason is a new ROW — the verdict function never changes.
+
+   :no-surface keeps an addon that nothing could advertise while it is dormant:
+   evicting it would leave no stub to route a call back to it, so its hooks and
+   its whole contribution would simply vanish and it would never re-mount."
+  [[:pinned     (fn [_ st] (= :pinned (get-in st [:lifecycle :policy])))]
+   [:eager      (fn [_ st] (= :eager (get-in st [:lifecycle :policy])))]
+   [:not-active (fn [_ st] (not= :active (:phase st)))]
+   [:no-surface (fn [_ st] (= :none (:surface/source st)))]
+   [:in-flight  (fn [_ st] (pos? (or (:in-flight st) 0)))]
+   [:never-used (fn [_ st] (nil? (:last-used-ms st)))]
+   [:fresh      (fn [now st] (< (- now (:last-used-ms st)) (get-in st [:lifecycle :idle-ms])))]])
+
 (defn- idle-verdict
-  "nil when STATE may be evicted at NOW on its own merits, else the KeepReason."
+  "nil when STATE may be evicted at NOW on its own merits, else the KeepReason
+   of the first rule in `keep-rules` that keeps it."
   [now state]
-  (let [{:keys [phase lifecycle last-used-ms in-flight]} state]
-    (cond
-      (= :pinned (:policy lifecycle))                 :pinned
-      (= :eager (:policy lifecycle))                  :eager
-      (not= :active phase)                            :not-active
-      (pos? (or in-flight 0))                         :in-flight
-      (nil? last-used-ms)                             :never-used
-      (< (- now last-used-ms) (:idle-ms lifecycle))   :fresh
-      :else                                           nil)))
+  (some (fn [[reason keep?]] (when (keep? now state) reason)) keep-rules))
+
+(defn lazy-permitted?
+  "May an addon with SURFACE (nil when it has none) be :lazy, i.e. dormant
+   behind stubs? Only when something can be advertised for it: a hooks-only or
+   surface-less addon has nothing a caller could reach to wake it."
+  [surface]
+  (not (surface/blank? surface)))
 
 (defn sweep-plan
   "What a sweep at NOW may evict. STATES is {id UseState}.

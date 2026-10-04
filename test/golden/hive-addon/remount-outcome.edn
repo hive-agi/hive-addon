@@ -1,0 +1,5 @@
+{:all-up #:hot{:restored [], :down []},
+ :down #:hot{:restored [], :down ["a"], :restored? false},
+ :never-tried #:hot{:restored [], :down ["b"], :restored? false},
+ :restore-failed #:hot{:restored [], :down ["a"], :restored? false},
+ :restored #:hot{:restored ["a"], :down [], :restored? true}}

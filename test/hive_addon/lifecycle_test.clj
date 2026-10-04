@@ -242,6 +242,64 @@
     (lc/boot! mgr)
     (is (= :dependent-active (:reason (lc/evict! mgr "probe.a" {:force? true}))))))
 
+;; =============================================================================
+;; Surface-less (hooks-only) addons cannot be dormant
+;; =============================================================================
+
+(deftest a-surface-less-addon-is-not-evicted-unless-forced
+  (let [specs [(spec "probe.h" "make-shared" :addon/config #:probe{:id "probe.h"} :addon/lifecycle {:policy :lazy :idle-ms 1})]
+        {:keys [mgr t]} (world specs)]
+    (lc/boot! mgr)
+    (is (= :active (lc/phase mgr "probe.h")) "boot downgraded it to eager")
+    (swap! t + 1000)
+    (let [rep (lc/evict! mgr "probe.h")]
+      (is (ls/validate ls/EvictionReport rep) (pr-str (ls/humanize-errors ls/EvictionReport rep)))
+      (testing "a refusal is never dressed as success"
+        (is (false? (:ok? rep)))
+        (is (true? (:refused? rep)))
+        (is (= :no-surface (:reason rep))))
+      (testing "and claims nothing about data: nothing was released"
+        (is (not (contains? rep :teardown/data-preserved?))))
+      (is (= :active (lc/phase mgr "probe.h"))))
+    (testing "force releases it, and the claim is the host's"
+      (let [rep (lc/evict! mgr "probe.h" {:force? true})]
+        (is (:evicted? rep))
+        (is (true? (:teardown/data-preserved? rep)))))))
+
+(deftest a-surface-less-addon-cannot-be-made-lazy-unless-forced
+  (let [specs [(spec "probe.h" "make-shared" :addon/config #:probe{:id "probe.h"})]
+        {:keys [mgr]} (world specs)]
+    (lc/boot! mgr)
+    (let [lc* (lc/set-policy! mgr "probe.h" {:policy :lazy})]
+      (is (= :no-surface (:refused lc*)))
+      (is (= :eager (get-in (lc/state mgr "probe.h") [:lifecycle :policy]))))
+    (is (= :lazy (:policy (lc/set-policy! mgr "probe.h" {:policy :lazy} {:force? true}))))))
+
+(deftest adopting-a-surface-less-lazy-addon-governs-it-eager
+  (let [{:keys [mgr]} (world [])
+        adopted (lc/adopt! mgr [(spec "probe.h" "make-shared" :addon/config #:probe{:id "probe.h"} :addon/lifecycle {:policy :lazy})])]
+    (is (= ["probe.h"] adopted))
+    (is (= :active (lc/phase mgr "probe.h")))
+    (is (= :eager (get-in (lc/state mgr "probe.h") [:lifecycle :policy])))
+    (is (= :no-surface (:downgraded (lc/state mgr "probe.h"))))
+    (testing "an adopted addon WITH a surface keeps its lazy policy"
+      (lc/adopt! mgr [(spec "probe.s" "make-b" :addon/lifecycle {:policy :lazy}
+                            :addon/surface ping-surface)])
+      (is (= :lazy (get-in (lc/state mgr "probe.s") [:lifecycle :policy]))))
+    (testing "forget! is adopt!'s inverse"
+      (is (= ["probe.h"] (lc/forget! mgr ["probe.h" "probe.nope"])))
+      (is (nil? (lc/state mgr "probe.h"))))))
+
+(deftest the-sweep-plan-keeps-an-addon-with-no-surface
+  (let [specs [(spec "a" "make-a")]
+        st    {"a" {:addon/id "a" :phase :active :lifecycle {:policy :lazy :idle-ms 1}
+                    :last-used-ms 0 :in-flight 0 :activations 1 :evictions 0
+                    :surface/source :none}}
+        plan  (policy/sweep-plan 1000 specs st)]
+    (is (= [] (:evict plan)))
+    (is (= {"a" :no-surface} (:kept plan)))
+    (is (ls/validate ls/SweepPlan plan))))
+
 (deftest a-learned-surface-lets-the-next-boot-stay-lazy
   (let [dir   (str (System/getProperty "java.io.tmpdir") "/hive-addon-lifecycle-" (System/nanoTime))
         s     {:addon/id "probe.tooled" :addon/type :native

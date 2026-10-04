@@ -130,7 +130,12 @@
    whether that addon mounted; :errors the accumulated failure strings.
 
    :entitlement is the earliest phase: a refused spec never has its constructor
-   namespace loaded. Open."
+   namespace loaded.
+
+   :restored? appears only on a FAILED result whose previous instance was put
+   back (mount!'s :fallback-instance): true when the old instance is live again,
+   false when that restore failed too (its reasons under :restore/errors).
+   :success? stays false either way — the NEW code did not mount. Open."
   [:map {:closed false}
    [:addon/id s/AddonId]
    [:success? :boolean]
@@ -139,6 +144,8 @@
    [:deny/reason {:optional true} :keyword]
    [:init-attempts {:optional true} [:int {:min 1}]]
    [:already-initialized? {:optional true} :boolean]
+   [:restored? {:optional true} :boolean]
+   [:restore/errors {:optional true} [:sequential :string]]
    [:constructor/status {:optional true} [:enum :resolved :absent :failed :invalid]]
    [:constructor/symbol {:optional true} :string]
    [:constructor/error {:optional true} :string]
@@ -148,11 +155,13 @@
 
 (def MountReport
   "Aggregate outcome of mounting a plan. :ok? is true only when every attempted
-   spec succeeded (graceful degrade still yields a report). Open."
+   spec succeeded (graceful degrade still yields a report). :restored lists the
+   failed ids whose previous instance was put back. Open."
   [:map {:closed false}
    [:mounted [:sequential MountResult]]
    [:order [:sequential s/AddonId]]
    [:skipped [:set s/AddonId]]
+   [:restored {:optional true} [:sequential s/AddonId]]
    [:ok? :boolean]])
 
 (def TeardownReport
