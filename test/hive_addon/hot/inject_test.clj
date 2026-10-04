@@ -160,6 +160,43 @@
           (unload-ns! 'probe.injected-three)
           (delete-tree! root))))))
 
+(deftest an-injected-spec-carries-its-source-dirs-so-a-reload-has-roots-on-any-thread
+  (testing "the injected URL lives on ONE DynamicClassLoader; a handler thread
+            outside that chain cannot resolve the source through io/resource.
+            The spec itself must carry the dirs, or the reload is scoped to
+            nothing and remounts stale code"
+    (let [root (fresh-project! "probe.injected" "probe.injected-five" #{})]
+      (try
+        (let [host   (mount-chain!)
+              report (inject/inject! host chain-specs (str root) {:hot? false})
+              specs  (:hot/specs report)
+              stamped (first (filter #(= "probe.injected" (:addon/id %)) specs))
+              src-dir (str (.getCanonicalFile (io/file root "src")))]
+          (is (:ok? report) (pr-str (:errors report)))
+          (testing "the report hands the host the stamped spec to keep"
+            (is (some? stamped))
+            (is (some #{src-dir} (:hot/source-dirs stamped))
+                (pr-str (:hot/source-dirs stamped))))
+          (is (nil? (hs/humanize-errors hs/InjectReport report))
+              (pr-str (hs/humanize-errors hs/InjectReport report)))
+          (let [result (promise)
+                all    (into (vec chain-specs) specs)
+                t      (doto (Thread.
+                              (fn []
+                                (deliver result
+                                         (hot/reload-addon! host all "probe.injected"
+                                                            {:reload-ns! (fn [_] {:loaded []})}))))
+                         (.setContextClassLoader (ClassLoader/getSystemClassLoader)))]
+            (.start t)
+            (.join t 10000)
+            (let [r (deref result 1000 ::timeout)]
+              (is (map? r))
+              (testing "the reload is scoped to the injected source dir"
+                (is (some #{src-dir} (:hot/roots r)) (pr-str (:hot/roots r)))))))
+        (finally
+          (unload-ns! 'probe.injected-five)
+          (delete-tree! root))))))
+
 (deftest without-a-dynamic-classloader-injection-refuses-instead-of-mounting-blind
   (let [root   (fresh-project! "probe.injected" "probe.injected-four" #{})
         result (promise)

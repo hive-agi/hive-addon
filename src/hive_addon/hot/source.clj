@@ -81,6 +81,25 @@
 ;; Resolution
 ;; =============================================================================
 
+(defn- dir-resource
+  "The first `path` that exists as a file under one of `dirs`, as a file: URL
+   probe — how a spec stamped with :hot/source-dirs is resolved without asking
+   any classloader."
+  [dirs path]
+  (some (fn [dir]
+          (let [f (io/file dir path)]
+            (when (.isFile f)
+              {:path path :url (.toURL (.toURI f))})))
+        dirs))
+
+(defn- loader-resource
+  "`path` through the thread's context loader, then through
+   clojure.lang.RT/baseLoader — an injected addon's URL lives on one
+   DynamicClassLoader that a handler thread's context loader may not reach."
+  [path]
+  (or (io/resource path)
+      (r/rescue nil (.getResource ^ClassLoader (clojure.lang.RT/baseLoader) ^String path))))
+
 (defn resolve-source
   "Resolve where `ns-str`'s source lives on the classpath.
 
@@ -91,32 +110,39 @@
       :hot/source-dir  <classpath root, :directory only>
       :hot/source-url  <resolved URL string, when found>}
 
+   `dirs` (optional) are source dirs recorded on the spec itself
+   (:hot/source-dirs, stamped by inject!); they are probed first, so an
+   injected addon resolves as :directory on any thread.
+
    Never throws — a namespace whose source is absent from the classpath (AOT-only
    or dynamically generated) resolves to :absent, which is a strategy input, not
    an error."
-  [ns-str]
-  (let [probe (->> (ns->resource-paths ns-str)
-                   (keep (fn [path]
-                           (when-let [url (io/resource path)]
-                             {:path path :url url})))
-                   first)]
-    (if-not probe
-      {:addon/init-ns   (str ns-str)
-       :hot/source-kind :absent
-       :hot/reloadable? false}
-      (let [{:keys [^URL url path]} probe
-            kind (classify-url url)
-            dir  (when (= :directory kind) (classpath-root url path))]
-        (cond-> {:addon/init-ns   (str ns-str)
-                 :hot/source-kind kind
-                 :hot/reloadable? (and (= :directory kind) (some? dir))
-                 :hot/source-url  (str url)}
-          dir (assoc :hot/source-dir dir))))))
+  ([ns-str] (resolve-source ns-str nil))
+  ([ns-str dirs]
+   (let [paths (ns->resource-paths ns-str)
+         probe (or (some #(dir-resource dirs %) paths)
+                   (some (fn [path]
+                           (when-let [url (loader-resource path)]
+                             {:path path :url url}))
+                         paths))]
+     (if-not probe
+       {:addon/init-ns   (str ns-str)
+        :hot/source-kind :absent
+        :hot/reloadable? false}
+       (let [{:keys [^URL url path]} probe
+             kind (classify-url url)
+             dir  (when (= :directory kind) (classpath-root url path))]
+         (cond-> {:addon/init-ns   (str ns-str)
+                  :hot/source-kind kind
+                  :hot/reloadable? (and (= :directory kind) (some? dir))
+                  :hot/source-url  (str url)}
+           dir (assoc :hot/source-dir dir)))))))
 
 (defn spec-source
-  "Resolve the AddonSource for a MountSpec, stamped with its :addon/id."
+  "Resolve the AddonSource for a MountSpec, stamped with its :addon/id. Dirs the
+   spec carries under :hot/source-dirs are probed before the classpath."
   [spec]
-  (assoc (resolve-source (:addon/init-ns spec))
+  (assoc (resolve-source (:addon/init-ns spec) (:hot/source-dirs spec))
          :addon/id (:addon/id spec)))
 
 (defn sources
