@@ -206,6 +206,16 @@
    [:ok? :boolean]
    [:errors {:optional true} [:sequential :string]]])
 
+(def DrainReport
+  "What hive-addon.hot.drain/drain! answers: the ids whose gate it closed, the
+   calls still in flight when the wait ended ({id n}, empty when drained), how
+   long it waited and the bound it waited under. Open."
+  [:map {:closed false}
+   [:hot/draining [:sequential s/AddonId]]
+   [:hot/in-flight [:map-of s/AddonId pos-int?]]
+   [:hot/waited-ms nat-int?]
+   [:hot/drain-ms nat-int?]])
+
 (def EjectReport
   "Outcome of plugging addons OUT of a running host
    (hive-addon.hot.inject/eject!) — what was removed, and what STAYS.
@@ -232,6 +242,11 @@
    :hot/refused? with :hot/blocking lists active dependents that stopped the
    ejection (pass :cascade? true to take them down and remount them without
    the ejected sibling; they are then under :hot/remounted and :mounted).
+
+   :hot/drain is the DrainReport of the wait for calls in flight that ran
+   before any teardown. :hot/busy? true means calls were still running when
+   :drain-ms ran out, so nothing was torn down and the gate was re-opened;
+   :hot/forced? true means the eject went ahead anyway under :force? true.
    :teardown/data-preserved? is computed over the teardowns that ran. Open."
   [:map {:closed false}
    [:hot/target :any]
@@ -239,6 +254,9 @@
    [:hot/unknown {:optional true} [:sequential :any]]
    [:hot/refused? {:optional true} :boolean]
    [:hot/blocking {:optional true} [:sequential s/AddonId]]
+   [:hot/drain {:optional true} DrainReport]
+   [:hot/busy? {:optional true} :boolean]
+   [:hot/forced? {:optional true} :boolean]
    [:hot/torn-down [:sequential s/AddonId]]
    [:hot/unregistered [:sequential s/AddonId]]
    [:hot/unsupported [:sequential s/AddonId]]

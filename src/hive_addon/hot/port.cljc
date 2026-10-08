@@ -76,3 +76,18 @@
      {:removed [dir] :kept [dir] :absent [dir] :dirs [dir] :shared {dir [owner]}},
      or a hive-dsl err Result. :kept holds a core dir or one another owner
      still claims (then also under :shared)."))
+
+(defprotocol IDrainGate
+  "Calls in flight per addon id, and a gate that stops admitting new ones: what
+   a plug OUT waits on so an addon is never shut down under a running call."
+  (-enter! [this id]
+    "Admit one call to ID. True when admitted and counted; false while ID is
+     closed (draining), and the call must not run.")
+  (-leave! [this id]
+    "Finish one admitted call to ID.")
+  (-close! [this id]
+    "Stop admitting calls to ID. Calls already admitted keep running.")
+  (-in-flight [this id]
+    "Admitted calls to ID not yet finished.")
+  (-open! [this id]
+    "Admit calls to ID again."))

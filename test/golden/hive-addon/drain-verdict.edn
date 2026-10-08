@@ -1,0 +1,5 @@
+{:busy :busy,
+ :busy-forced :forced,
+ :drained :drained,
+ :drained-forced :drained,
+ :no-key :drained}

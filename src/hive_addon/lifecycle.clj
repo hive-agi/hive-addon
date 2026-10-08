@@ -270,10 +270,17 @@
                                         m)))]
     (not= (get-in old [id :in-flight]) (get-in new [id :in-flight]))))
 
-(defn- end-use! [mgr id]
+(defn- end-use!
+  "Finish one counted use of ID. An ID the manager forgot while the call ran
+   (a forced unmount) is left forgotten."
+  [mgr id]
   (let [t (now mgr)]
-    (update-state! mgr id #(-> % (update :in-flight (fn [n] (max 0 (dec n))))
-                               (assoc :last-used-ms t)))))
+    (swap! (:states mgr)
+           (fn [m] (if (contains? m id)
+                     (update m id #(-> % (update :in-flight (fn [n] (max 0 (dec (or n 0)))))
+                                       (assoc :last-used-ms t)))
+                     m)))
+    nil))
 
 (defn touch!
   "Mark ID used now."
