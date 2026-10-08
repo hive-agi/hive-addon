@@ -24,7 +24,19 @@ if diff -u "$out/jvm" "$out/clr.clean" > "$out/preflight.diff"; then
 else
   echo 'FAIL jvm != clojureclr preflight'; cat "$out/preflight.diff"; status=1
 fi
-echo 'SKIP portable.oracle: hive-dsl.result/rescue-fn catches :default as CLR class (ParseException line 352)'
-echo 'SKIP oracle-driver: portable.oracle prelude cannot load'
-if [ "${REQUIRE_HOSTS:-0}" = 1 ]; then status=1; fi
+# Staging hive-dsl resolves absent CLR Throwable to :default; override its
+# expansion helper to Exception without modifying the read-only source tree.
+dsl="${HIVE_DSL_SRC:-/home/klein/PP/hive/hive-dsl-wt/staging-ro/src}"
+export CLOJURE_LOAD_PATH="$root/src:$root/test:$dsl"
+for leg in oracle oracle_driver; do
+  clojure -J-Xmx2g -Sdeps "{:paths [\"$root/src\" \"$root/test\" \"$dsl\"]}" -M -e "(require 'portable.${leg//_/-})" > "$out/$leg.jvm" 2>&1 || status=1
+  "$clr" -e "(require 'hive-dsl.result) (alter-var-root (resolve 'hive-dsl.result/host-catch-all) (constantly (fn [_] 'Exception))) (load-file \"$root/test/portable/$leg.cljc\")" > "$out/$leg.clr" 2>&1 || status=1
+  grep -E ' \| |^ORACLE' "$out/$leg.jvm" > "$out/$leg.jvm.lines"
+  grep -E ' \| |^ORACLE' "$out/$leg.clr" > "$out/$leg.clr.lines"
+  if diff -u "$out/$leg.jvm.lines" "$out/$leg.clr.lines" > "$out/$leg.diff"; then
+    echo "OK jvm == clojureclr $leg ($(wc -l < "$out/$leg.jvm.lines") lines)"
+  else
+    echo "FAIL jvm != clojureclr $leg"; cat "$out/$leg.diff"; status=1
+  fi
+done
 exit "$status"
