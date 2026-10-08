@@ -65,6 +65,32 @@ and constants (`valid-addon-types`, `standard-capabilities`, `health-statuses`).
   (hooks        [_] {}))
 ```
 
+## Runs on
+
+The contract is `.cljc`, and an addon written against it is checked on every
+runtime below by a DIFFERENTIAL oracle: the same `test/portable/*.cljc` files
+run on each host, and the printed lines must be byte-identical to the JVM's.
+A host is listed as supported only on that evidence, never on "it loads".
+
+| Runtime | Reader feature | Contract oracle vs JVM | Runner |
+|---|---|---|---|
+| JVM Clojure 1.12 | `:clj` | reference | `clojure -M:test` |
+| ClojureWasm (`cljw`) 1.14.11 | `:clj` | identical: preflight 34 constructs, oracle 74, driver, opaque 56, schema 22 observations | `test/portable/run.sh` |
+| clojurust (`cljrs`) 0.1.0 | `:cljrs` | identical: preflight 34 constructs, oracle 74 observations (driver and schema legs blocked: cross-namespace protocols, `deftype`) | `test/portable/run.sh` |
+| ClojureCLR 1.12.2 (.NET 9) | `:cljr` | identical: preflight 34 constructs, oracle 75 lines, driver 81 lines | `test/portable/run_clojureclr.sh` |
+
+In progress (branches, not yet admitted): Basilisp (`:lpy`; blocked on
+cross-namespace protocol dispatch, reported upstream) and Phel (`:phel`;
+blocked on its namespace scanner). Every new dialect gets its own reader
+feature and libraries add an explicit branch for it, so a non-JVM host never
+borrows JVM interop through `:clj`. (cljw is the deliberate exception: its
+reader features are `#{:clj :default}` and it implements the interop-free
+subset of Clojure, which is exactly what `run.sh` checks.)
+
+What this buys an addon author: one `.cljc` addon can be hosted by a JVM
+service, a ~7.5 MB single-binary `cljw` tool, a Rust process, or a .NET
+application, with the same tool surface and the same contract checks.
+
 ## Reliable mounting
 
 Mount manifests may request bounded initialization retries:
