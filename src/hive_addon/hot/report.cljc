@@ -49,12 +49,17 @@
 
    An id the report never attempted is down: it was torn down and nothing put
    anything back. :hot/restored? is present only when something failed, and is
-   true exactly when nothing is down."
+   true exactly when nothing is down.
+
+   Restored is drawn from the FAILED ids only: an id whose new instance came
+   up is up, whatever a stale :restored? on its row says. Counting it restored
+   reported a healthy mount as a rollback (property counterexample: one row
+   {:success? true :restored? true})."
   [ids mount-report]
   (let [by-id    (into {} (map (juxt :addon/id identity)) (:mounted mount-report))
         up?      #(:success? (by-id %))
-        restored (into [] (filter #(true? (:restored? (by-id %)))) ids)
         failed   (into [] (remove up?) ids)
+        restored (into [] (filter #(true? (:restored? (by-id %)))) failed)
         down     (into [] (remove (set restored)) failed)]
     (cond-> {:hot/restored restored
              :hot/down     down}
