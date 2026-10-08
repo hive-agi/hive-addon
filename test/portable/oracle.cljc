@@ -191,7 +191,7 @@
 ;; handing the handler the raw strings it asked to have coerced
 (emit "cli/refuses-schema-without-fn"
       (try (do (cli/make-handler handlers {:coerce-schema {:n [:int]}}) :no-refusal)
-           (catch #?(:clj Throwable :default :default) t
+           (catch #?(:clj Throwable :cljr Exception :default :default) t
              (:cli/error (ex-data t)))))
 
 
