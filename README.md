@@ -77,6 +77,7 @@ A host is listed as supported only on that evidence, never on "it loads".
 | JVM Clojure 1.12 | `:clj` | reference | `clojure -M:test` |
 | ClojureWasm (`cljw`) 1.14.11 | `:clj` | identical: preflight 34 constructs, oracle 74, driver, opaque 56, schema 22 observations | `test/portable/run.sh` |
 | clojurust (`cljrs`) 0.1.0 | `:cljrs` | identical: preflight 34 constructs, oracle 74 observations (driver and schema legs blocked: cross-namespace protocols, `deftype`) | `test/portable/run.sh` |
+| ClojureScript 1.12.42 on Node 22 | `:cljs` | identical: preflight 34, oracle 75, driver 81, opaque 57, schema 98 lines | `test/portable/run_cljs.sh` |
 | ClojureCLR 1.12.2 (.NET 9) | `:cljr` | identical: preflight 34 constructs, oracle 75 lines, driver 81 lines | `test/portable/run_clojureclr.sh` |
 
 In progress (branches, not yet admitted): Basilisp (`:lpy`; blocked on
