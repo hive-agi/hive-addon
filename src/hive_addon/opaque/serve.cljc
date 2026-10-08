@@ -49,7 +49,7 @@
     ;; TOTAL reader conditional: :clj covers the JVM and cljw (both have
     ;; Throwable), :default covers cljs and cljrs. A non-total one would elide
     ;; the catch on an unlisted host and turn the graceful default into a crash.
-    (catch #?(:clj Throwable :default :default) t
+    (catch #?(:clj Throwable :cljr Exception :default :default) t
       (if (proto/unimplemented-method? t)
         fallback
         (throw t)))))
@@ -146,14 +146,14 @@
    the addon's own method. Only the last can echo an op."
   [addon line]
   (let [request (try (codec/decode line)
-                     (catch #?(:clj Throwable :default :default) _ ::unreadable))]
+                     (catch #?(:clj Throwable :cljr Exception :default :default) _ ::unreadable))]
     (cond
       (= ::unreadable request) (codec/error "unreadable request line")
       (not (map? request))     (codec/error "request line is not a map")
       :else
       (try
         (handle addon request)
-        (catch #?(:clj Throwable :default :default) t
+        (catch #?(:clj Throwable :cljr Exception :default :default) t
           (codec/error (:op request) (or (ex-message t) (str t))))))))
 
 (defn handle-line
