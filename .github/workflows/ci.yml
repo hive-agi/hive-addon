@@ -151,6 +151,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ClojureScript 1.12.x bundles a Closure Compiler built for Java 21; the
+      # runner's default JDK 17 fails every compile with UnsupportedClassVersionError.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
       - uses: DeLaGuardo/setup-clojure@13.0
         with:
           cli: latest
