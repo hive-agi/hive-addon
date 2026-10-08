@@ -141,3 +141,33 @@ jobs:
           MALLI_SRC: ${{ github.workspace }}/malli/src
           DYNALOAD_SRC: ${{ github.workspace }}/dynaload/src
         run: ./test/portable/run.sh
+
+  # ClojureScript on Node: the same portable legs, compiled with cljs.main and
+  # diffed line for line against the JVM (kanban ADDON-ORACLE-CLJS). Both legs
+  # take their deps from deps.edn, so they cannot compare different libraries.
+  cljs-oracle:
+    name: cljs oracle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeLaGuardo/setup-clojure@13.0
+        with:
+          cli: latest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.gitlibs
+          key: cljdeps-cljs-${{ hashFiles('deps.edn') }}
+          restore-keys: cljdeps-
+
+      - name: cljs differential oracle
+        env:
+          REQUIRE_HOSTS: '1'
+        run: bash test/portable/run_cljs.sh
