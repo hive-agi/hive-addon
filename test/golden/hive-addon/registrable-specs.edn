@@ -1,0 +1,17 @@
+{:dup-in-mounted
+ [{:addon/id "a", :addon/init-ns "a.init", :hot/source-dirs ["/a2"]}],
+ :fresh-failed [#:addon{:id "a", :init-ns "a.init"}],
+ :fresh-mounted
+ [#:addon{:id "a", :init-ns "a.init"}
+  {:addon/id "b",
+   :addon/init-ns "b.init",
+   :hot/source-dirs ["/b/src"]}],
+ :mixed
+ [#:addon{:id "a", :init-ns "a.init"}
+  {:addon/id "c", :addon/init-ns "c.init", :hot/source-dirs ["/c"]}],
+ :nothing-up [],
+ :reinjected-dup
+ [{:addon/id "hive.rss",
+   :addon/init-ns "hive.rss.init",
+   :hot/source-dirs ["/rss/src"]}
+  #:addon{:id "a", :init-ns "a.init"}]}
