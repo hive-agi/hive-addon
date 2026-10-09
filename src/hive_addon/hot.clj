@@ -37,7 +37,8 @@
             [hive-addon.lifecycle.oracle :as oracle]
             [hive-dsl.result :as r]
             [hive-addon.wire :as wire]
-            [hive-addon.hot.report :as verdict]))
+            [hive-addon.hot.report :as verdict]
+            [clojure.string :as str]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -190,6 +191,18 @@
    :diagnostic (diagnostic/missing-addon addon-id)
    :errors [(str "no mounted spec with :addon/id " (pr-str addon-id))]})
 
+(defn dormant-hint
+  "The operator-facing line for seeds that were dormant and so NOT reloaded.
+   A reload of a dormant addon is not a failure, because its next activation
+   mounts the current code, but it also loads nothing now. Without this line a
+   caller sees ok? true and believes the edit is live. nil when `ids` is empty."
+  [ids]
+  (when-let [ids (seq (distinct ids))]
+    (str (str/join ", " ids)
+         (if (next ids) " are" " is")
+         " dormant: nothing was reloaded now. The next activation mounts the current code;"
+         " run `hot activate addon=" (first ids) "` to load it immediately.")))
+
 (defn- dormant-report
   "Every seed is dormant: nothing is mounted to reload, and the next activation
    mounts whatever code is current then."
@@ -200,6 +213,7 @@
    :hot/affected []
    :hot/torn-down []
    :hot/dormant (vec ids)
+   :hot/dormant-hint (dormant-hint ids)
    :teardown/data-preserved? (verdict/data-preserved? [])
    :mounted []
    :ok? true})
@@ -276,7 +290,8 @@
                               (strategy/reload! spec ctx)))
                           grouped)]
         (cond-> (merge-reports reports opts)
-          (seq slept) (assoc :hot/dormant slept))))))
+          (seq slept) (assoc :hot/dormant slept
+                             :hot/dormant-hint (dormant-hint slept)))))))
 
 (defn reload-addon!
   "Reload ONE addon by id, cascading to its dependents. This is what the
