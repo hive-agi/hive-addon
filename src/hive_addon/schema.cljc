@@ -297,7 +297,7 @@
      contract-checks)))
 
 ;; =============================================================================
-;; Function-schema DATA for the 10 IAddon methods (scoped/reversible audit)
+;; Function-schema DATA for the 11 IAddon methods (scoped/reversible audit)
 ;; =============================================================================
 
 (def method-schemas
