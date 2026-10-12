@@ -121,6 +121,19 @@
   "Return shape of (tools addon): a sequence of tool-defs (may be empty)."
   [:sequential ToolDef])
 
+(def ResourceDef
+  "An MCP resource descriptor; handler stays in the addon JVM, never on wire."
+  [:map {:closed false}
+   [:uri [:string {:min 1}]]
+   [:name [:string {:min 1}]]
+   [:description {:optional true} :string]
+   [:mimeType {:optional true} :string]
+   [:handler ifn?]])
+
+(def Resources
+  "Return shape of (resources addon): dynamically enumerated descriptors."
+  [:sequential ResourceDef])
+
 (def SchemaExtensions
   "Return shape of (schema-extensions addon). Two idioms coexist in the wild:
    a SEQUENCE of DataScript attribute-defs (each a map — the protocol's original
@@ -165,6 +178,8 @@
    :addon/init-result       InitResult
    :addon/tool-def          ToolDef
    :addon/tools             Tools
+   :addon/resource-def      ResourceDef
+   :addon/resources         Resources
    :addon/schema-extensions SchemaExtensions
    :addon/hooks             HookMap
    :addon/excluded-tools    ExcludedTools
@@ -223,7 +238,8 @@
    [:addon/schema-extensions #'proto/schema-extensions SchemaExtensions false]
    [:addon/health            #'proto/health            HealthReport     false]
    [:addon/excluded-tools    #'proto/excluded-tools    ExcludedTools    true]
-   [:addon/hooks             #'proto/hooks             HookMap          true]])
+   [:addon/hooks             #'proto/hooks             HookMap          true]
+   [:addon/resources         #'proto/resources         Resources        true]])
 
 (defn validate-addon
   "Validate a live IAddon instance's contract OUTPUTS against the schemas.
@@ -299,4 +315,5 @@
    'hive-addon.protocol/schema-extensions [:=> [:cat :any] SchemaExtensions]
    'hive-addon.protocol/health            [:=> [:cat :any] HealthReport]
    'hive-addon.protocol/excluded-tools    [:=> [:cat :any] ExcludedTools]
-   'hive-addon.protocol/hooks             [:=> [:cat :any] HookMap]})
+   'hive-addon.protocol/hooks             [:=> [:cat :any] HookMap]
+   'hive-addon.protocol/resources         [:=> [:cat :any] Resources]})

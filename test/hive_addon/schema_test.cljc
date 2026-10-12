@@ -145,8 +145,8 @@
               (str nm " generated value failed validation: " (pr-str x))))))))
 
 (deftest method-schemas-cover-protocol
-  (testing "there is a function schema for every one of the 10 IAddon methods"
+  (testing "there is a function schema for every one of the 11 IAddon methods"
     (let [method-syms (set (map #(symbol "hive-addon.protocol" (name %))
                                 '[addon-id addon-type capabilities initialize! shutdown!
-                                  tools schema-extensions health excluded-tools hooks]))]
+                                  tools schema-extensions health excluded-tools hooks resources]))]
       (is (= method-syms (set (keys s/method-schemas)))))))
