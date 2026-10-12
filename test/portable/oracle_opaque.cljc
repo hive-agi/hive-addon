@@ -28,7 +28,13 @@
 ;;
 ;; SPDX-License-Identifier: MIT
 
-(defn emit [label v] (println (str label " | " (pr-str v))))
+(defn emit
+  "One canonical `label | value` line. Namespace-map printing is pinned ON:
+   the JVM's clojure.main binds it true, cljw and cljrs print the same way,
+   and cljs defaults it false, so an unpinned printer made a namespaced map
+   (#:probe{...} vs {:probe/score ...}) the only cljs divergence."
+  [label v]
+  (println (str label " | " (binding [*print-namespace-maps* true] (pr-str v)))))
 
 (defn sorted-set-of
   "Canonicalize a set to a sorted vector of its printed elements."

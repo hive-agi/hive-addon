@@ -103,6 +103,14 @@
              (or (not (contains? out :hot/restored?))
                  (= (:hot/restored? out) (empty? (:hot/down out)))))))})
 
+(deftest an-id-that-mounted-is-never-restored
+  ;; The property counterexample, pinned: a row that came up but still carries
+  ;; :restored? true was reported as a rollback of a healthy mount.
+  (let [rep {:mounted [{:addon/id "7" :success? true :phase :entitlement :restored? true}]
+             :order [] :skipped #{} :ok? false}]
+    (is (= {:hot/restored [] :hot/down []}
+           (report/remount-outcome ["7"] rep)))))
+
 ;; =============================================================================
 ;; released-dirs
 ;; =============================================================================

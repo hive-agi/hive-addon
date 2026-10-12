@@ -1,0 +1,7 @@
+{:none nil,
+ :one
+ "hive.darkmatter is dormant: nothing was reloaded now. The next activation mounts the current code; run `hot activate addon=hive.darkmatter` to load it immediately.",
+ :repeated
+ "probe.a is dormant: nothing was reloaded now. The next activation mounts the current code; run `hot activate addon=probe.a` to load it immediately.",
+ :two
+ "probe.a, probe.b are dormant: nothing was reloaded now. The next activation mounts the current code; run `hot activate addon=probe.a` to load it immediately."}

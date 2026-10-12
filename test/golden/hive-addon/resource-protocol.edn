@@ -1,0 +1,3 @@
+{:declared
+ [{:uri "workflow://one", :name "One", :mimeType "application/edn"}]
+ :legacy []}

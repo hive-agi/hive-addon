@@ -253,7 +253,8 @@
    accepted edge: the alternative is naming exception classes, which is not
    portable at all."
   [t]
-  (boolean (some->> (ex-message t) (re-find unimplemented-method-re))))
+  (boolean (or #?(:cljr (instance? System.NotImplementedException t) :default false)
+               (some->> (ex-message t) (re-find unimplemented-method-re)))))
 
 ;; =============================================================================
 ;; Standard Capabilities

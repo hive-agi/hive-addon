@@ -226,6 +226,23 @@
     (vec (r/rescue [] (lc/adopt! mgr mounted-specs)))
     []))
 
+(defn registrable-specs
+  "The MountSpecs an inject hands to hive-hot: the ones already mounted
+   (`specs`) plus only those `fresh` specs whose id is in `up`, the set of ids
+   that mounted. A fresh addon that failed to mount is left out, so hive-hot
+   never tracks an addon that is not there.
+
+   Deduplicated by :addon/id. When an id appears more than once (e.g. a
+   classpath spec and an injected spec for the same addon), the LAST one wins,
+   because a fresh spec carries the :hot/source-dirs the injection stamped.
+   Each id keeps the position of its first appearance."
+  [specs fresh up]
+  (let [candidates (into (vec specs) (filter #(contains? up (:addon/id %))) fresh)
+        latest     (into {} (map (juxt :addon/id identity)) candidates)]
+    (into []
+          (comp (map :addon/id) (distinct) (map latest))
+          candidates)))
+
 (defn inject!
   "Mount the addons whose manifests live under `path` into the running `host`,
    alongside `specs` — the MountSpecs already mounted (the reload bridge's
@@ -304,8 +321,9 @@
                                                (source/watchable-dirs up-fresh))
                 adopted    (if (:govern? opts true) (adopt-into-lifecycle! up-fresh) [])
                 hot-report (when (:hot? opts true)
-                             (hot/hot! host all {:mount-opts mount-opts
-                                                 :solve-opts (:solve-opts opts {})}))
+                             (hot/hot! host (registrable-specs specs fresh up)
+                                       {:mount-opts mount-opts
+                                        :solve-opts (:solve-opts opts {})}))
                 dirs-added (if (:hot? opts true)
                              (hot-extend-dirs! (or (:hot-dirs opts) (dirs/hot-dirs)) up-fresh)
                              {:added []})

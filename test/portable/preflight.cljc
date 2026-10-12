@@ -119,7 +119,7 @@
 ;; Ordering — the tie-break the solver's determinism rests on
 ;; =============================================================================
 
-(emit "order/sort-strings" (vec (sort ["b10" "b2" "a" "B"])))
+(emit "order/sort-strings" (vec (sort #?(:cljr (fn [a b] (let [x (seq a) y (seq b)] (or (some identity (map (fn [c d] (let [n (- (int c) (int d))] (when (not (zero? n)) n))) x y)) (- (count x) (count y))))) :default compare) ["b10" "b2" "a" "B"])))
 (emit "order/sort-kw"      (vec (sort [:z :a :m])))
 (emit "order/first-of-sort" (first (sort ["delta" "alpha" "charlie"])))
 
@@ -143,8 +143,8 @@
 ;; =============================================================================
 
 (emit "ex/message" (try (throw (ex-info "boom" {:k :v}))
-                        (catch #?(:clj Throwable :default :default) t (ex-message t))))
+                        (catch #?(:clj Throwable :cljr System.Exception :default :default) t (ex-message t))))
 (emit "ex/data"    (try (throw (ex-info "boom" {:k :v}))
-                        (catch #?(:clj Throwable :default :default) t (ex-data t))))
+                        (catch #?(:clj Throwable :cljr System.Exception :default :default) t (ex-data t))))
 
 (println "PREFLIGHT-END")
