@@ -238,8 +238,7 @@
    [:addon/schema-extensions #'proto/schema-extensions SchemaExtensions false]
    [:addon/health            #'proto/health            HealthReport     false]
    [:addon/excluded-tools    #'proto/excluded-tools    ExcludedTools    true]
-   [:addon/hooks             #'proto/hooks             HookMap          true]
-   [:addon/resources         #'proto/resources         Resources        true]])
+   [:addon/hooks             #'proto/hooks             HookMap          true]])
 
 (defn validate-addon
   "Validate a live IAddon instance's contract OUTPUTS against the schemas.
@@ -297,7 +296,7 @@
      contract-checks)))
 
 ;; =============================================================================
-;; Function-schema DATA for the 11 IAddon methods (scoped/reversible audit)
+;; Function-schema DATA for the 10 IAddon methods (scoped/reversible audit)
 ;; =============================================================================
 
 (def method-schemas
@@ -315,5 +314,4 @@
    'hive-addon.protocol/schema-extensions [:=> [:cat :any] SchemaExtensions]
    'hive-addon.protocol/health            [:=> [:cat :any] HealthReport]
    'hive-addon.protocol/excluded-tools    [:=> [:cat :any] ExcludedTools]
-   'hive-addon.protocol/hooks             [:=> [:cat :any] HookMap]
-   'hive-addon.protocol/resources         [:=> [:cat :any] Resources]})
+   'hive-addon.protocol/hooks             [:=> [:cat :any] HookMap]})

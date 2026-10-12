@@ -198,15 +198,7 @@
      Returns {} (empty map) if the addon contributes no hooks.
 
      Legacy addons that don't implement this method are handled
-     gracefully by the registry (defaults to {}).")
-
-  (resources [this]
-    "Return MCP resource descriptors for an addon advertising :resources.
-     Each descriptor has :uri (stable string), :name (string), optional
-     :description/:mimeType, and :handler (fn [uri] -> text or MCP content map).
-     Listing is evaluated at request time so newly stored resources appear.
-     Handlers remain inside the addon JVM; never serialize them over MCP.
-     Optional for legacy addons; return [] when there are none."))
+     gracefully by the registry (defaults to {})."))
 
 ;; =============================================================================
 ;; Predicates

@@ -1,8 +1,9 @@
 (ns hive-addon.resources-test
   "The optional IAddon resource contribution contract."
-  (:require [clojure.test :refer [is]]
+  (:require [clojure.test :refer [deftest is]]
             [clojure.test.check.generators :as gen]
             [hive-addon.protocol :as proto]
+            [hive-addon.resources :as resource]
             [hive-addon.schema :as schema]
             [hive-test.trifecta :refer [deftrifecta]]))
 
@@ -36,19 +37,58 @@
     (tools [_] [])
     (schema-extensions [_] [])
     (health [_] {:status :ok})
-    (resources [_] [valid])))
+    resource/IAddonResources
+    (list-resources [_] [valid])
+    (read-resources [_ uri] ((:handler valid) uri))))
+
+(defn- legacy-addon []
+  (reify proto/IAddon
+    (addon-id [_] "legacy.resources")
+    (addon-type [_] :native)
+    (capabilities [_] #{})
+    (initialize! [_ _] {:success? true})
+    (shutdown! [_] nil)
+    (tools [_] [])
+    (schema-extensions [_] [])
+    (health [_] {:status :ok})))
+
+(defn- invalid-addon []
+  (reify proto/IAddon
+    (addon-id [_] "invalid.resources")
+    (addon-type [_] :native)
+    (capabilities [_] #{:resources})
+    (initialize! [_ _] {:success? true})
+    (shutdown! [_] nil)
+    (tools [_] [])
+    (schema-extensions [_] [])
+    (health [_] {:status :ok})
+    resource/IAddonResources
+    (list-resources [_] [(dissoc valid :uri)])
+    (read-resources [_ _] (throw (ex-info "Invalid handler invoked" {})))))
 
 (defn resource-read [addon]
-  (proto/resources addon))
+  (resource/resources addon))
 
 (deftrifecta resource-protocol-dispatch
   #'resource-read
   {:golden-path "test/golden/hive-addon/resource-protocol.edn"
-   :cases {:declared (resource-addon)}
+   :cases {:declared (resource-addon) :legacy (legacy-addon)}
    :xf (fn [rs] (mapv #(select-keys % [:uri :name :mimeType]) rs))
    :gen (gen/return (resource-addon))
    :pred (fn [rs] (and (= 1 (count rs)) (schema/validate :addon/resources rs)))
    :mutations [["no-resources" (fn [_] [])]]
    :assert (fn []
              (is (= "workflow://one" (:uri (first (resource-read (resource-addon))))))
-             (is (:ok (schema/validate-addon (resource-addon)))))})
+             (is (= [] (resource-read (legacy-addon))))
+             (is (:ok (schema/validate-addon (legacy-addon))))
+             (is (:ok (schema/validate-addon (resource-addon))))
+             (is (= "{}" (resource/read-resource (resource-addon) "workflow://one")))
+             (is (nil? (resource/read-resource (resource-addon) "workflow://missing")))
+             (is (= :invalid-resources
+                    (:addon/error (ex-data (try (resource/resources (invalid-addon))
+                                                 (catch clojure.lang.ExceptionInfo e e)))))))})
+
+(deftest iaddon-method-set-is-frozen
+  (is (= #{:addon-id :addon-type :capabilities :initialize! :shutdown! :tools
+           :schema-extensions :health :excluded-tools :hooks}
+         (set (keys (:sigs proto/IAddon))))))
