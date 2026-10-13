@@ -149,6 +149,10 @@ jobs:
         env:
           VER: ${{ steps.resolve.outputs.version }}
         run: |
+          # Resolve bumped VERSION in the working tree to find this tag. Drop
+          # that edit first: git refuses to switch over a modified file even
+          # when the tag carries the same content.
+          git checkout -- VERSION
           git checkout --detach "v$VER"
           if [ "$(tr -d '[:space:]' < VERSION)" != "$VER" ]; then
             echo "::error::tag v$VER does not carry VERSION $VER"
