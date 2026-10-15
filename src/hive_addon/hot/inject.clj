@@ -27,8 +27,9 @@
    code the next require would fail to find.
 
    Maven dependencies of the injected addon are NOT resolved by default; pass
-   `:resolve-deps? true` to hand the project's deps.edn :deps to
-   clojure.repl.deps/add-libs first (needs a tools.deps basis in the image)."
+   `:resolve-deps? true` to resolve only the project's deps.edn :deps through
+   the tools.deps CLI, then extend the loader with libs absent from the running
+   basis (requires Clojure 1.12 and the tools.deps CLI)."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
@@ -155,12 +156,19 @@
       (let [m    (r/rescue {} (edn/read-string (slurp deps)))
             libs (dissoc (:deps m {}) 'org.clojure/clojure 'io.github.hive-agi/hive-addon)
             basis-fn (r/rescue nil (requiring-resolve 'clojure.java.basis/current-basis))
-            resolve-fn (r/rescue nil (requiring-resolve 'clojure.tools.deps/resolve-deps))]
-        (if (and basis-fn resolve-fn)
+            update-fn (r/rescue nil (requiring-resolve 'clojure.java.basis.impl/update-basis!))
+            invoke-fn (r/rescue nil (requiring-resolve 'clojure.tools.deps.interop/invoke-tool))]
+        (if (and basis-fn update-fn invoke-fn)
           (let [res (r/try-effect
                       (let [basis (basis-fn)
-                            resolved (resolve-fn {:deps libs
-                                                  :mvn/repos (merge (:mvn/repos basis) (:mvn/repos m))} {})
+                            project (assoc m :deps libs :mvn/repos
+                                           (merge (:mvn/repos basis) (:mvn/repos m)))
+                            resolved (if (seq libs)
+                                       (:libs (invoke-fn {:tool-alias :deps
+                                                         :fn 'clojure.tools.deps/create-basis
+                                                         :args {:dir path :root {} :user {}
+                                                                :project project}}))
+                                       {})
                             {:keys [added skipped]} (dependency-delta resolved (:libs basis))
                             loader (dynamic-loader)]
                         (when (and (seq added) (nil? loader))
@@ -170,11 +178,12 @@
                           (let [result (extend-classpath! dep-path {:loader loader})]
                             (when (r/err? result)
                               (throw (ex-info (:message result) {:path dep-path})))))
-                        {:added (mapv key added) :skipped (mapv key skipped)}))]
+                        (when (seq added) (update-fn update :libs merge (into {} added)))
+                        {:added (mapv first added) :skipped (mapv first skipped)}))]
             (if (r/err? res)
               {:ok? false :error (:message res)}
               (assoc (:ok res) :ok? true)))
-          {:ok? false :error "clojure.tools.deps and clojure.java.basis are unavailable (Clojure < 1.12 or no tools.deps)"})))))
+          {:ok? false :error "clojure.tools.deps interop or clojure.java.basis unavailable (Clojure < 1.12)"})))))
 
 ;; =============================================================================
 ;; inject! — the mount pipeline over a slice that did not exist yet
