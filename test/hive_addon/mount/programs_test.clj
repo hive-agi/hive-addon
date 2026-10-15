@@ -10,7 +10,8 @@
             [hive-addon.mount.schema :as ms]
             [hive-addon.mount.solve :as solve]
             [hive-test.trifecta :as tri]
-            [clojure.set :as set]))
+            [clojure.set :as set]
+            [clojure.string :as str]))
 
 (def ^:private fixture-spec
   {:addon/id "program-probe" :addon/type :native
@@ -78,3 +79,16 @@
         preview (boundary/dry-run plan (port/atom-mount-host))]
     (is (:ok? preview))
     (is (= {} (get-in preview [:mounted 0 :programs :programs/resolved])))))
+
+(deftest present-programs-allow-construction
+  (let [plan (solve/solve [fixture-spec])
+        host (port/atom-mount-host)
+        opts {:resolve-program {"git" "/bin/git" "rg" "/bin/rg"}}
+        preview (boundary/dry-run plan host opts)
+        mounted (boundary/mount! plan host opts)]
+    (is (:ok? preview))
+    (is (= :skipped (get-in preview [:mounted 0 :phase])))
+    (is (= #{} (get-in preview [:mounted 0 :programs :programs/missing])))
+    (is (= :failed (get-in mounted [:mounted 0 :phase])))
+    (is (str/includes? (-> mounted :mounted first :errors first)
+                       "constructor must not run for a missing program"))))
