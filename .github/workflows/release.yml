@@ -31,6 +31,27 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+# Order of effects, and why.
+#
+# Up to 1.1.6 the job pushed the release commit and the v* tag BEFORE Deploy.
+# When Deploy failed (Clojars 401 on 1.1.5 and on 1.1.6) the tag was already
+# public, so a rerun of the same run read the same VERSION, bumped it to the
+# same next number and died at `git tag` with
+# "fatal: tag 'v1.1.6' already exists". Deploy was then skipped every time.
+#
+# Now nothing leaves the runner until the artifact is on Clojars:
+#   resolve -> commit + tag LOCALLY -> deploy -> push tag and commit.
+# A failed deploy discards the local commit and tag with the runner, so a
+# rerun computes the same version and simply tries again. Deploy is a no-op
+# when the coordinate is already in the registry (hive-build probes it), so a
+# run that deployed but failed to push can be rerun and only pushes.
+#
+# An existing tag is never re-cut. Resolve classifies it:
+#   tagged and on Clojars     -> released; the job ends green, nothing to do.
+#   tagged, NOT on Clojars    -> an orphan left by the old order; the TAGGED
+#                                tree is checked out and published as is,
+#                                with no new commit and no new tag.
+
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -45,40 +66,139 @@ jobs:
         with:
           cli: latest
 
-      # A published pom is immutable, so the suite runs BEFORE anything is
-      # minted. ci.yml covers pull requests; without this step a red push
-      # straight to main would still deploy.
-      - name: Run tests
-        run: clojure -M:test
-
-      - name: Bump version
-        # Pinned release (hive-agent): a VERSION without its tag is a line a
-        # human set, released as written. A tagged VERSION is already out, so
-        # a push mints the next patch; a dispatch bumps by its level.
-        run: |
-          VER=$(tr -d '[:space:]' < VERSION)
-          if [ -z "${{ inputs.level }}" ] && ! git rev-parse -q --verify "refs/tags/v$VER" >/dev/null; then
-            echo "VERSION $VER is untagged: releasing it as written"
-          else
-            clojure -T:build bump :level :${{ inputs.level || 'patch' }}
-          fi
-
-      - name: Commit and tag
-        run: |
-          VER=$(cat VERSION)
-          git config user.name  "hive-ci"
-          git config user.email "ci@hive-agi.local"
-          git add VERSION
-          # [skip ci] stops this push from retriggering the workflow. A
-          # pinned VERSION has nothing to commit, only a tag to cut.
-          git diff --cached --quiet || git commit -m "chore(release): $VER [skip ci]"
-          # Annotated: `git push --follow-tags` ignores lightweight tags,
-          # which would publish the artifact and silently drop the tag.
-          git tag -a "v$VER" -m "release $VER"
-          git push --follow-tags
-
-      - name: Deploy
+      # Fail before anything is minted when the deploy credentials are not
+      # wired at all. Only whether they are set is reported, never a value.
+      - name: Check deploy credentials are present
         env:
           CLOJARS_USERNAME: ${{ secrets.CLOJARS_USERNAME }}
           CLOJARS_PASSWORD: ${{ secrets.CLOJARS_DEPLOY_TOKEN }}
+        run: |
+          missing=""
+          [ -n "$CLOJARS_USERNAME" ] || missing="$missing CLOJARS_USERNAME"
+          [ -n "$CLOJARS_PASSWORD" ] || missing="$missing CLOJARS_DEPLOY_TOKEN"
+          if [ -n "$missing" ]; then
+            echo "::error::release secrets not set:$missing"
+            exit 1
+          fi
+
+      - name: Resolve release version
+        id: resolve
+        env:
+          LEVEL: ${{ inputs.level }}
+        run: |
+          CUR=$(tr -d '[:space:]' < VERSION)
+          # Pinned release (hive-agent): a VERSION without its tag is a line a
+          # human set, released as written; so is any VERSION when a dispatch
+          # says level=none. Otherwise a tagged VERSION is already out and the
+          # next version is minted (patch on push, the level on dispatch).
+          if [ "$LEVEL" = "none" ] || { [ -z "$LEVEL" ] && ! git rev-parse -q --verify "refs/tags/v$CUR" >/dev/null; }; then
+            echo "VERSION $CUR: releasing it as written"
+          else
+            clojure -T:build bump :level :"${LEVEL:-patch}"
+          fi
+          VER=$(tr -d '[:space:]' < VERSION)
+
+          LIB=$(awk '$1 ~ /:lib/ {print $2; exit}' version.edn)
+          GROUP=${LIB%/*}
+          ART=${LIB#*/}
+          POM="https://repo.clojars.org/${GROUP//.//}/$ART/$VER/$ART-$VER.pom"
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' "$POM")
+          case "$CODE" in
+            200) PUBLISHED=true ;;
+            404) PUBLISHED=false ;;
+            *)   echo "::error::Clojars answered $CODE for $POM; cannot tell whether $VER is out"
+                 exit 1 ;;
+          esac
+
+          if git rev-parse -q --verify "refs/tags/v$VER" >/dev/null; then
+            if [ "$PUBLISHED" = true ]; then
+              MODE="done"
+              echo "v$VER is tagged and on Clojars: nothing to release"
+            else
+              MODE=orphan
+              echo "v$VER is tagged but NOT on Clojars: publishing the tagged tree"
+            fi
+          else
+            MODE=new
+            if [ "$PUBLISHED" = true ]; then
+              # Deployed by an earlier attempt whose push failed: only the
+              # commit and tag are missing. Deploy below is a registry no-op.
+              echo "$VER is on Clojars but untagged: finishing the release"
+            fi
+          fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "mode=$MODE"   >> "$GITHUB_OUTPUT"
+
+      - name: Commit and tag locally
+        if: steps.resolve.outputs.mode == 'new'
+        env:
+          VER: ${{ steps.resolve.outputs.version }}
+        run: |
+          git config user.name  "hive-ci"
+          git config user.email "ci@hive-agi.local"
+          git add VERSION
+          # [skip ci] stops the publish below from retriggering the workflow.
+          # A pinned VERSION has nothing to commit, only a tag to cut.
+          git diff --cached --quiet || git commit -m "chore(release): $VER [skip ci]"
+          # Annotated, so it carries a tagger and a message. It stays local
+          # until Deploy has succeeded.
+          git tag -a "v$VER" -m "release $VER"
+
+      - name: Check out the orphan tag
+        if: steps.resolve.outputs.mode == 'orphan'
+        env:
+          VER: ${{ steps.resolve.outputs.version }}
+        run: |
+          # Resolve bumped VERSION in the working tree to find this tag. Drop
+          # that edit first: git refuses to switch over a modified file even
+          # when the tag carries the same content.
+          git checkout -- VERSION
+          git checkout --detach "v$VER"
+          if [ "$(tr -d '[:space:]' < VERSION)" != "$VER" ]; then
+            echo "::error::tag v$VER does not carry VERSION $VER"
+            exit 1
+          fi
+
+      # A published pom is immutable, so the suite gates Deploy, and it runs
+      # on the exact tree that ships (the orphan tag's tree included). Nothing
+      # is public yet: the commit and tag above are local. ci.yml covers pull
+      # requests; without this step a red push straight to main would deploy.
+      - name: Run tests
+        if: steps.resolve.outputs.mode != 'done'
+        run: clojure -M:test
+
+      - name: Deploy
+        if: steps.resolve.outputs.mode != 'done'
+        env:
+          # The hive-agi secret is CLOJARS_DEPLOY_TOKEN, while deps-deploy and
+          # build.clj both read CLOJARS_PASSWORD. Map one onto the other.
+          CLOJARS_USERNAME: ${{ secrets.CLOJARS_USERNAME }}
+          CLOJARS_PASSWORD: ${{ secrets.CLOJARS_DEPLOY_TOKEN }}
         run: clojure -T:build deploy
+
+      # Only after the artifact is on Clojars does the tag become public.
+      - name: Publish release tag and commit
+        if: steps.resolve.outputs.mode == 'new'
+        env:
+          VER: ${{ steps.resolve.outputs.version }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          # The tag first: it names the tree that was just deployed and never
+          # needs a fast-forward.
+          git push origin "refs/tags/v$VER"
+          # The branch may have moved while the job ran. The release commit
+          # only touches VERSION, so it rebases onto any tip that did not
+          # itself change VERSION. The tag keeps pointing at the deployed tree.
+          for _ in 1 2 3; do
+            if git push origin "HEAD:refs/heads/$BRANCH"; then
+              exit 0
+            fi
+            git fetch origin "$BRANCH"
+            if ! git rebase "origin/$BRANCH"; then
+              git rebase --abort
+              echo "::error::$BRANCH changed VERSION concurrently. v$VER is deployed and tagged; set VERSION to $VER on $BRANCH by hand."
+              exit 1
+            fi
+          done
+          echo "::error::could not update $BRANCH after 3 attempts; v$VER is deployed and tagged"
+          exit 1
