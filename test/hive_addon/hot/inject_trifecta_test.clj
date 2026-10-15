@@ -45,3 +45,22 @@
          (into [] (comp (map :addon/id) (distinct)
                         (map (fn [id] (some #(when (= id (:addon/id %)) %) cands))))
                cands)))]]})
+
+(tri/deftrifecta dependency-delta-verdict
+  hive-addon.hot.inject/dependency-delta
+  {:golden-path "test/golden/hive-addon/dependency-delta.edn"
+   :apply? true
+   :cases {:image-transitive-is-not-added
+           [[['image/diamond {:paths ["image.jar"]}]
+             ['addon/new {:paths ["new.jar"]}]]
+            {'image/diamond {:paths ["image.jar"]}}]
+           :all-in-image [[['image/base {:paths ["base.jar"]}]]
+                          {'image/base {:paths ["base.jar"]}}]
+           :only-new [[['addon/new {:paths ["new.jar"]}]] {}]}
+   :mutations
+   [["readds-image-library"
+     (fn [resolved _image-libs] {:added (vec resolved) :skipped []})]
+    ["drops-transitive-addon-library"
+     (fn [resolved image-libs]
+       {:added []
+        :skipped (into [] (filter #(contains? image-libs (first %))) resolved)})]]})

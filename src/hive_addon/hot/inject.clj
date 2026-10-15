@@ -133,22 +133,48 @@
     (with-open [cl (URLClassLoader. urls nil)]
       (boundary/discover-specs cl))))
 
+(defn dependency-delta
+  "Only the injected project's resolved libs absent from the running image.
+   The project is resolved alone, never merged into the image's top-level deps:
+   merging turns image transitive libs into roots and loses parent exclusions.
+   Pure over resolved libs and basis libs; keeps the resolver's path order."
+  [resolved image-libs]
+  {:added (into [] (remove #(contains? image-libs (first %))) resolved)
+   :skipped (into [] (filter #(contains? image-libs (first %))) resolved)})
+
 (defn- resolve-deps!
-  "Hand the project's deps.edn :deps — minus the libs the image must keep
-   single, Clojure and hive-addon itself — to clojure.repl.deps/add-libs.
-   Never throws. {:ok? bool :added [..]} or {:ok? false :error ..}."
+  "Resolve only the injected project's :deps closure, minus the libs the image
+   must keep single, Clojure and hive-addon itself. Never merge the image's deps
+   into the resolver: doing so loses exclusions on image dependency edges.
+   Extend the running loader with only paths of libs absent from its basis.
+   Never throws. {:ok? bool :added [..] :skipped [..]} or {:ok? false :error ..}."
   [path]
   (let [deps (io/file path "deps.edn")]
     (if-not (.exists deps)
-      {:ok? true :added [] :skipped? true}
+      {:ok? true :added [] :skipped [] :skipped? true}
       (let [m    (r/rescue {} (edn/read-string (slurp deps)))
-            libs (dissoc (:deps m {}) 'org.clojure/clojure 'io.github.hive-agi/hive-addon)]
-        (if-let [add-libs (r/rescue nil (requiring-resolve 'clojure.repl.deps/add-libs))]
-          (let [res (r/try-effect (binding [*repl* true] (add-libs libs)))]
+            libs (dissoc (:deps m {}) 'org.clojure/clojure 'io.github.hive-agi/hive-addon)
+            basis-fn (r/rescue nil (requiring-resolve 'clojure.java.basis/current-basis))
+            resolve-fn (r/rescue nil (requiring-resolve 'clojure.tools.deps/resolve-deps))]
+        (if (and basis-fn resolve-fn)
+          (let [res (r/try-effect
+                      (let [basis (basis-fn)
+                            resolved (resolve-fn {:deps libs
+                                                  :mvn/repos (merge (:mvn/repos basis) (:mvn/repos m))} {})
+                            {:keys [added skipped]} (dependency-delta resolved (:libs basis))
+                            loader (dynamic-loader)]
+                        (when (and (seq added) (nil? loader))
+                          (throw (ex-info "no DynamicClassLoader available for dependency paths" {})))
+                        (doseq [[_ {:keys [paths]}] added
+                                dep-path paths]
+                          (let [result (extend-classpath! dep-path {:loader loader})]
+                            (when (r/err? result)
+                              (throw (ex-info (:message result) {:path dep-path})))))
+                        {:added (mapv key added) :skipped (mapv key skipped)}))]
             (if (r/err? res)
               {:ok? false :error (:message res)}
-              {:ok? true :added (vec (:ok res))}))
-          {:ok? false :error "clojure.repl.deps/add-libs is unavailable (Clojure < 1.12)"})))))
+              (assoc (:ok res) :ok? true)))
+          {:ok? false :error "clojure.tools.deps and clojure.java.basis are unavailable (Clojure < 1.12 or no tools.deps)"})))))
 
 ;; =============================================================================
 ;; inject! — the mount pipeline over a slice that did not exist yet
