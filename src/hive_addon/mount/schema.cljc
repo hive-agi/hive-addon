@@ -51,6 +51,10 @@
    PROVIDERS for. A provider fills a point by declaring the point's
    :extension/capability in its own :addon/capabilities.
 
+   :addon/requires-programs names host executables required before construction.
+   The mount boundary asks an injected resolver for each program; no shell
+   lookup belongs in this manifest or its pure solver.
+
    :addon/trust-class defaults to :foss when absent; :proprietary makes the
    spec gated, and a gated spec mounts only through a licence gate.
    :addon/entitlement names the unit a gate checks the licence against.
@@ -89,6 +93,7 @@
    [:addon/capabilities {:optional true :default #{}} s/CapabilitySet]
    [:addon/dependencies {:optional true :default #{}} [:set s/AddonId]]
    [:addon/requires-capabilities {:optional true :default #{}} [:set :keyword]]
+   [:addon/requires-programs {:optional true :default #{}} [:set [:string {:min 1}]]]
    [:addon/extension-points {:optional true :default []} ext/ExtensionPoints]
    [:addon/init-retry {:optional true} InitRetryPolicy]
    [:addon/reload-strategy {:optional true} :keyword]
@@ -130,7 +135,8 @@
    whether that addon mounted; :errors the accumulated failure strings.
 
    :entitlement is the earliest phase: a refused spec never has its constructor
-   namespace loaded.
+   namespace loaded. :programs records a refused prerequisite before ctor load;
+   :programs carries the per-name resolution report on preview results.
 
    :restored? appears only on a FAILED result whose previous instance was put
    back (mount!'s :fallback-instance): true when the old instance is live again,
@@ -139,8 +145,11 @@
   [:map {:closed false}
    [:addon/id s/AddonId]
    [:success? :boolean]
-   [:phase [:enum :entitlement :config :resolved :registered :initialized :skipped :failed]]
+   [:phase [:enum :entitlement :programs :config :resolved :registered :initialized :skipped :failed]]
    [:errors {:optional true} [:sequential :string]]
+   [:programs {:optional true} [:map
+                               [:programs/resolved [:map-of :string [:maybe :any]]]
+                               [:programs/missing [:set :string]]]]
    [:deny/reason {:optional true} :keyword]
    [:init-attempts {:optional true} [:int {:min 1}]]
    [:already-initialized? {:optional true} :boolean]
