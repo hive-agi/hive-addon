@@ -172,6 +172,23 @@
            :constructor/cause-message (or (ex-message root)
                                           (.getName (class root)))})))))
 
+(defn resolve-programs
+  "Resolve every declared executable through the host-supplied resolver, without
+   invoking a shell. Returns the per-program locations and missing names as data.
+   A nil resolver is intentionally fail-closed for nonempty requirements."
+  [spec resolve-program]
+  (let [names (sort (:addon/requires-programs spec #{}))
+        resolved (into (sorted-map)
+                       (map (fn [name]
+                              [name (when resolve-program
+                                      (r/rescue nil (resolve-program name)))]))
+                       names)]
+    {:programs/resolved resolved
+     :programs/missing (into (sorted-set)
+                             (keep (fn [[name location]]
+                                     (when-not location name)))
+                             resolved)}))
+
 (defn- dependency-ids
   "The ids `spec` depends on within `all-specs`: hard :addon/dependencies plus
    every peer whose :addon/capabilities satisfy a :addon/requires-capabilities."
@@ -398,7 +415,7 @@
    When PROVISION is given and the addon initialized, (provision spec
    instance) runs and its report is attached as :runtime. Provisioning is
    auxiliary: its failure is reported, never turned into a mount failure."
-  [spec host all-specs resolve-config init-retry on-event sleep-fn gate provision]
+  [spec host all-specs resolve-config init-retry on-event sleep-fn gate provision resolve-program]
   (let [id (:addon/id spec)]
     (if-let [reason (ent/permit gate spec)]
       (do
@@ -409,37 +426,43 @@
         (assoc (mount-result id false :entitlement
                              :errors [(str "licence gate refused: " (symbol reason))])
                :deny/reason reason))
-      (let [resolution (resolve-constructor spec)
-            ctor       (:constructor resolution)]
-        (if-not (= :resolved (:constructor/status resolution))
-          (mount-result id false :resolved
-                        :errors [(:constructor/error resolution)]
-                        :constructor-resolution resolution)
-          (let [cfg (mount-config spec host all-specs resolve-config init-retry)]
-            (if (r/err? cfg)
-              (mount-result id false :config :errors [(:message cfg)])
-              (let [{:keys [config retry-policy]} (:ok cfg)
-                    built    (r/try-effect (ctor config))
-                    instance (when-not (r/err? built) (:ok built))]
-                (cond
-                  (r/err? built)
-                  (mount-result id false :failed
-                                :errors [(str "constructor threw: " (:message built))])
+      (let [{:programs/keys [missing] :as programs} (resolve-programs spec resolve-program)]
+        (if (seq missing)
+          (assoc (mount-result id false :programs
+                               :errors [(str "missing required programs: "
+                                             (str/join ", " missing))])
+                 :programs programs)
+          (let [resolution (resolve-constructor spec)
+                ctor       (:constructor resolution)]
+            (if-not (= :resolved (:constructor/status resolution))
+              (mount-result id false :resolved
+                            :errors [(:constructor/error resolution)]
+                            :constructor-resolution resolution)
+              (let [cfg (mount-config spec host all-specs resolve-config init-retry)]
+                (if (r/err? cfg)
+                  (mount-result id false :config :errors [(:message cfg)])
+                  (let [{:keys [config retry-policy]} (:ok cfg)
+                        built    (r/try-effect (ctor config))
+                        instance (when-not (r/err? built) (:ok built))]
+                    (cond
+                      (r/err? built)
+                      (mount-result id false :failed
+                                    :errors [(str "constructor threw: " (:message built))])
 
-                  (nil? instance)
-                  (mount-result id false :failed :errors ["constructor returned nil"])
+                      (nil? instance)
+                      (mount-result id false :failed :errors ["constructor returned nil"])
 
-                  (not (proto/addon? instance))
-                  (mount-result id false :failed
-                                :errors [(str "constructor did not return an IAddon; got "
-                                              (.getName (class instance))
-                                              (when (map? instance)
-                                                (str " with keys "
-                                                     (pr-str (vec (sort (map str (keys instance))))))))])
+                      (not (proto/addon? instance))
+                      (mount-result id false :failed
+                                    :errors [(str "constructor did not return an IAddon; got "
+                                                  (.getName (class instance))
+                                                  (when (map? instance)
+                                                    (str " with keys "
+                                                         (pr-str (vec (sort (map str (keys instance))))))))])
 
-                  :else
-                  (register-and-init! spec instance host config retry-policy
-                                      on-event sleep-fn provision))))))))))
+                      :else
+                      (register-and-init! spec instance host config retry-policy
+                                          on-event sleep-fn provision))))))))))))
 
 (defn- restore-one
   "Put PREVIOUS — the instance SPEC's addon had before this mount — back into
@@ -471,6 +494,8 @@
    succeeded.
 
    opts: {:resolve-config (fn [spec] -> config-map)  (default resolve-config-default)
+          :resolve-program (fn [program-name] -> path | nil) — host executable
+                         lookup; absent fails closed for declared requirements
           :init-retry    retry-policy override
           :license-gate  ILicenseGate or (fn [spec] -> nil | reason)
                          (default: the installed gate)
@@ -497,7 +522,7 @@
    silently drop those siblings from :mount/dependencies, handing the remounted
    addon a thinner config than its original mount got."
   ([plan host] (mount! plan host {}))
-  ([plan host {:keys [resolve-config init-retry on-event sleep-fn license-gate peer-specs
+  ([plan host {:keys [resolve-config resolve-program init-retry on-event sleep-fn license-gate peer-specs
                       provision fallback-instance]
                :or {resolve-config port/resolve-config-default
                     init-retry {}
@@ -512,8 +537,8 @@
                         (when (proto/addon? p) p))))
          results (mapv (fn [spec]
                          (let [res (mount-one spec host peers resolve-config
-                                              init-retry on-event sleep-fn gate provision)
-                               old (when-not (or (:success? res) (= :entitlement (:phase res)))
+                                              init-retry on-event sleep-fn gate provision resolve-program)
+                               old (when-not (or (:success? res) (#{:entitlement :programs} (:phase res)))
                                      (previous spec))]
                            (if old
                              (restore-one res spec old host peers resolve-config
@@ -537,9 +562,11 @@
    and resolves each ctor read-only, marking a spec :phase :skipped :success?
    true when it would mount, :phase :entitlement when the gate refuses, else
    :phase :resolved :success? false. Golden-replay parity: for an all-success
-   plan, dry-run :order and :mounted ids equal mount! :order and :mounted ids."
+   plan, dry-run :order and :mounted ids equal mount! :order and :mounted ids.
+   A host may supply :resolve-program (name -> path or nil) to report declared
+   executable prerequisites; missing programs fail the preview before ctor load."
   ([plan host] (dry-run plan host {}))
-  ([plan _host {:keys [license-gate]}]
+  ([plan _host {:keys [license-gate resolve-program]}]
    (let [gate    (or license-gate (ent/installed-gate))
          ordered (:ordered plan)
          results (mapv (fn [spec]
@@ -548,12 +575,20 @@
                              (assoc (mount-result id false :entitlement
                                                   :errors [(str "licence gate refused: " (symbol reason))])
                                     :deny/reason reason)
-                             (let [resolution (resolve-constructor spec)]
-                               (if (= :resolved (:constructor/status resolution))
-                                 (mount-result id true :skipped)
-                                 (mount-result id false :resolved
-                                               :errors [(:constructor/error resolution)]
-                                               :constructor-resolution resolution))))))
+                             (let [{:programs/keys [missing] :as programs}
+                                   (resolve-programs spec resolve-program)]
+                               (if (seq missing)
+                                 (assoc (mount-result id false :programs
+                                                      :errors [(str "missing required programs: "
+                                                                    (str/join ", " missing))])
+                                        :programs programs)
+                                 (let [resolution (resolve-constructor spec)]
+                                   (assoc (if (= :resolved (:constructor/status resolution))
+                                            (mount-result id true :skipped)
+                                            (mount-result id false :resolved
+                                                          :errors [(:constructor/error resolution)]
+                                                          :constructor-resolution resolution))
+                                          :programs programs)))))))
                        ordered)]
      {:mounted results
       :order   (mapv :addon/id ordered)
