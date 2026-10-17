@@ -188,6 +188,48 @@
       (is (= :remount
              (strategy/-strategy-id (:ok (strategy/select spec-a (ctx-for spec-a)))))))))
 
+(deftest concurrent-reloads-wait-for-the-first-flight
+  (let [entered (promise)
+        release (promise)
+        second-entered (promise)
+        calls   (atom 0)
+        active  (atom 0)
+        overlap (atom false)
+        probe   (reify strategy/IReloadStrategy
+                  (-strategy-id [_] :probe/blocking)
+                  (-applies? [_ _ _] true)
+                  (-reload! [_ _ ctx]
+                    (when (> (swap! active inc) 1) (reset! overlap true))
+                    (let [n (swap! calls inc)]
+                      (when (= n 1)
+                        (deliver entered true)
+                        (deref release 5000 nil)))
+                    (swap! active dec)
+                    {:hot/trigger (:hot/trigger ctx :manual)
+                     :hot/strategy :probe/blocking
+                     :hot/seeds (set (:hot/seeds ctx))
+                     :hot/affected ["probe.a"]
+                     :hot/torn-down []
+                     :teardown/data-preserved? true
+                     :mounted []
+                     :ok? true}))
+        opts    {:strategies [probe]}
+        first   (future (hot/reload-addon! nil [spec-a] "probe.a" opts))]
+    (try
+      (is (= true (deref entered 5000 nil)))
+      (let [second (future (deliver second-entered true)
+                           (hot/reload-addon! nil [spec-a] "probe.a" opts))]
+        (try
+          (is (= true (deref second-entered 5000 nil)))
+          (is (not (realized? second)))
+          (deliver release true)
+          (is (:ok? (deref first 5000 nil)))
+          (is (:ok? (deref second 5000 nil)))
+          (is (= 2 @calls))
+          (is (false? @overlap))
+          (finally (deliver release true))))
+      (finally (deliver release true)))))
+
 (deftest registering-the-same-strategy-twice-is-idempotent
   (let [calls (atom [])]
     (strategy/register-strategy! (->RecordingStrategy calls))

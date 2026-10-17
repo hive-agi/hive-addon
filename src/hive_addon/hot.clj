@@ -250,6 +250,8 @@
 ;; Triggering a reload
 ;; =============================================================================
 
+(defonce ^:private reload-flight-lock (Object.))
+
 (defn reload-seeds!
   "Reload `seed-ids` and every addon that depends on them.
 
@@ -259,39 +261,40 @@
 
    Returns a RemountReport."
   [host specs seed-ids & [opts]]
-  (let [opts     (or opts {})
-        dormant? (or (:dormant? opts) oracle/dormant?)
-        asleep   (into #{} (comp (map :addon/id) (filter dormant?)) specs)
-        specs    (into [] (remove #(contains? asleep (:addon/id %))) specs)
-        by-id    (into {} (map (juxt :addon/id identity)) specs)
-        seeds    (into #{} (filter by-id) seed-ids)
-        slept    (into [] (comp (filter asleep) (distinct)) seed-ids)]
-    (cond
-      (and (empty? seeds) (seq slept))
-      (dormant-report slept opts)
+  (locking reload-flight-lock
+    (let [opts     (or opts {})
+          dormant? (or (:dormant? opts) oracle/dormant?)
+          asleep   (into #{} (comp (map :addon/id) (filter dormant?)) specs)
+          specs    (into [] (remove #(contains? asleep (:addon/id %))) specs)
+          by-id    (into {} (map (juxt :addon/id identity)) specs)
+          seeds    (into #{} (filter by-id) seed-ids)
+          slept    (into [] (comp (filter asleep) (distinct)) seed-ids)]
+      (cond
+        (and (empty? seeds) (seq slept))
+        (dormant-report slept opts)
 
-      (empty? seeds)
-      (not-found-report seed-ids opts)
+        (empty? seeds)
+        (not-found-report seed-ids opts)
 
-      :else
-      (let [chain (or (:strategies opts) (strategy/installed-strategies))
-            ;; Group by the strategy each seed selects, under its own context.
-            grouped (group-by
-                     (fn [id]
-                       (let [spec (by-id id)
-                             ctx  (reload-ctx host specs spec #{id} opts)
-                             sel  (strategy/select spec ctx chain)]
-                         (if (r/err? sel) :hot/none (strategy/-strategy-id (:ok sel)))))
-                     (sort seeds))
-            reports (mapv (fn [[_sid ids]]
-                            (let [group (set ids)
-                                  spec  (by-id (first (sort group)))
-                                  ctx   (reload-ctx host specs spec group opts)]
-                              (strategy/reload! spec ctx)))
-                          grouped)]
-        (cond-> (merge-reports reports opts)
-          (seq slept) (assoc :hot/dormant slept
-                             :hot/dormant-hint (dormant-hint slept)))))))
+        :else
+        (let [chain (or (:strategies opts) (strategy/installed-strategies))
+              ;; Group by the strategy each seed selects, under its own context.
+              grouped (group-by
+                       (fn [id]
+                         (let [spec (by-id id)
+                               ctx  (reload-ctx host specs spec #{id} opts)
+                               sel  (strategy/select spec ctx chain)]
+                           (if (r/err? sel) :hot/none (strategy/-strategy-id (:ok sel)))))
+                       (sort seeds))
+              reports (mapv (fn [[_sid ids]]
+                              (let [group (set ids)
+                                    spec  (by-id (first (sort group)))
+                                    ctx   (reload-ctx host specs spec group opts)]
+                                (strategy/reload! spec ctx)))
+                            grouped)]
+          (cond-> (merge-reports reports opts)
+            (seq slept) (assoc :hot/dormant slept
+                               :hot/dormant-hint (dormant-hint slept))))))))
 
 (defn reload-addon!
   "Reload ONE addon by id, cascading to its dependents. This is what the
