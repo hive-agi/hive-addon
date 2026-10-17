@@ -37,9 +37,9 @@
                        io.github.hive-agi/hive-schemas {:mvn/version "0.1.40"}}
          ;; Heap cap: an uncapped JVM sizes its heap from host RAM, and an
          ;; uncapped test JVM OOM-killed the shared host twice on 2026-10-17.
-         ;; This suite is small; 1500m leaves ample headroom. A -J-Xmx on the
+         ;; The schema-conformance tests need more than 1500m (they OOMed in CI at that cap), so 3g. A -J-Xmx on the
          ;; command line comes after alias :jvm-opts and still overrides it.
-         :jvm-opts ["-Xmx1500m"]
+         :jvm-opts ["-Xmx3g"]
          :main-opts ["-m" "cognitect.test-runner"]
          :exec-fn cognitect.test-runner.api/test}
 
