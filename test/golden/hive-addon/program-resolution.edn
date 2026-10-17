@@ -1,0 +1,8 @@
+{:all-present
+ #:programs{:resolved {"git" "/bin/git", "rg" "/bin/rg"},
+            :missing #{}},
+ :no-requirements #:programs{:resolved {}, :missing #{}},
+ :no-resolver
+ #:programs{:resolved {"git" nil, "rg" nil}, :missing #{"git" "rg"}},
+ :partial
+ #:programs{:resolved {"git" "/bin/git", "rg" nil}, :missing #{"rg"}}}

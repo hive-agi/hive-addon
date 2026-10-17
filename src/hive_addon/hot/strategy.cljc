@@ -169,14 +169,16 @@
 (defn- empty-reload-warning
   "The sentence an empty reload reports. With no roots the cause is upstream of
    the reloader: the seed's source dir never resolved, so there was nothing to
-   scope the reload to."
+   scope the reload to. With roots, nothing on disk changed; an image that
+   diverged in memory (a load-file from another checkout) needs a forced reload."
   [roots]
   (str "no namespace was reloaded; the mounted code is whatever was already loaded"
        " (roots: " (pr-str (vec roots)) ")"
-       (when (empty? roots)
+       (if (empty? roots)
          (str ". The seed's source dir was not resolved, so the reload had no root"
               " to scan: check :hot/source-kind in `hot list`, or inject the addon"
-              " so its spec carries :hot/source-dirs"))))
+              " so its spec carries :hot/source-dirs")
+         ". Nothing under the roots changed on disk; pass force to re-read them")))
 
 (defn- with-empty-reload
   "Flag a reload whose OWN namespace pass loaded nothing.

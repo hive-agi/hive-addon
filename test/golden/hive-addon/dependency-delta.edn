@@ -1,0 +1,6 @@
+{:all-in-image
+ {:added [], :skipped [[image/base {:paths ["base.jar"]}]]},
+ :image-transitive-is-not-added
+ {:added [[addon/new {:paths ["new.jar"]}]],
+  :skipped [[image/diamond {:paths ["image.jar"]}]]},
+ :only-new {:added [[addon/new {:paths ["new.jar"]}]], :skipped []}}

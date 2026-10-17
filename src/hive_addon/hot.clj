@@ -102,11 +102,27 @@
    rather than loaded on this caller's behalf. Falls back to hive-hot's
    image-wide `reload!` when the scoped entry point is absent (an older
    hive-hot), then to plain `require :reload` over the given namespaces when
-   hive-hot is absent altogether."
+   hive-hot is absent altogether.
+
+   opts :force? true asks the scoped reload to re-read every file under the
+   roots even when none changed on disk, repairing an image that diverged
+   from its mounted source. A hive-hot that predates :force? answers without
+   :forced?, and the result then carries a :hot/force-unsupported diagnostic
+   rather than a silent no-op."
   ([] (ns-reloader nil))
-  ([roots]
+  ([roots] (ns-reloader roots nil))
+  ([roots {:keys [force?]}]
    (if-let [scoped! (and (seq roots) (hot-var 'hive-hot.core/reload-scoped!))]
-     (fn [_ns-strs] (scoped! (vec roots)))
+     (if force?
+       (fn [_ns-strs]
+         (let [out (scoped! (vec roots) {:force? true})]
+           (cond-> out
+             (not (:forced? out))
+             (assoc :diagnostic
+                    {:code :hot/force-unsupported
+                     :retryable false
+                     :message "force requested, but this hive-hot ignores :force?; upgrade hive-hot"}))))
+       (fn [_ns-strs] (scoped! (vec roots))))
      (if-let [reload! (hot-var 'hive-hot.core/reload!)]
        (fn [_ns-strs] (reload!))
        require-reload!))))
@@ -155,7 +171,7 @@
 (defn- reload-ctx
   [host specs spec seeds {:keys [trigger changed-ns ns-reloaded? mount-opts
                                  solve-opts strategies reload-ns! mount-driver
-                                 ctor-probe]
+                                 ctor-probe force?]
                           :as opts}]
   (let [stray (select-keys opts mount-opt-keys)
         roots (seed-roots specs seeds)]
@@ -172,7 +188,7 @@
      :hot/mount-opts (merge stray (or mount-opts {}))
      :hot/solve-opts (or solve-opts {})
      :hot/strategies strategies
-     :hot/reload-ns! (or reload-ns! (ns-reloader roots))
+     :hot/reload-ns! (or reload-ns! (ns-reloader roots {:force? force?}))
      ;; The probe verifies the DEFAULT reloader's claim. A caller that injects
      ;; its own reloader answers for it — unless it injects a probe as well.
      :hot/ctor-probe (or ctor-probe (when-not reload-ns! constructor-probe))}))
@@ -250,6 +266,8 @@
 ;; Triggering a reload
 ;; =============================================================================
 
+(defonce ^:private reload-flight-lock (Object.))
+
 (defn reload-seeds!
   "Reload `seed-ids` and every addon that depends on them.
 
@@ -259,39 +277,40 @@
 
    Returns a RemountReport."
   [host specs seed-ids & [opts]]
-  (let [opts     (or opts {})
-        dormant? (or (:dormant? opts) oracle/dormant?)
-        asleep   (into #{} (comp (map :addon/id) (filter dormant?)) specs)
-        specs    (into [] (remove #(contains? asleep (:addon/id %))) specs)
-        by-id    (into {} (map (juxt :addon/id identity)) specs)
-        seeds    (into #{} (filter by-id) seed-ids)
-        slept    (into [] (comp (filter asleep) (distinct)) seed-ids)]
-    (cond
-      (and (empty? seeds) (seq slept))
-      (dormant-report slept opts)
+  (locking reload-flight-lock
+    (let [opts     (or opts {})
+          dormant? (or (:dormant? opts) oracle/dormant?)
+          asleep   (into #{} (comp (map :addon/id) (filter dormant?)) specs)
+          specs    (into [] (remove #(contains? asleep (:addon/id %))) specs)
+          by-id    (into {} (map (juxt :addon/id identity)) specs)
+          seeds    (into #{} (filter by-id) seed-ids)
+          slept    (into [] (comp (filter asleep) (distinct)) seed-ids)]
+      (cond
+        (and (empty? seeds) (seq slept))
+        (dormant-report slept opts)
 
-      (empty? seeds)
-      (not-found-report seed-ids opts)
+        (empty? seeds)
+        (not-found-report seed-ids opts)
 
-      :else
-      (let [chain (or (:strategies opts) (strategy/installed-strategies))
-            ;; Group by the strategy each seed selects, under its own context.
-            grouped (group-by
-                     (fn [id]
-                       (let [spec (by-id id)
-                             ctx  (reload-ctx host specs spec #{id} opts)
-                             sel  (strategy/select spec ctx chain)]
-                         (if (r/err? sel) :hot/none (strategy/-strategy-id (:ok sel)))))
-                     (sort seeds))
-            reports (mapv (fn [[_sid ids]]
-                            (let [group (set ids)
-                                  spec  (by-id (first (sort group)))
-                                  ctx   (reload-ctx host specs spec group opts)]
-                              (strategy/reload! spec ctx)))
-                          grouped)]
-        (cond-> (merge-reports reports opts)
-          (seq slept) (assoc :hot/dormant slept
-                             :hot/dormant-hint (dormant-hint slept)))))))
+        :else
+        (let [chain (or (:strategies opts) (strategy/installed-strategies))
+              ;; Group by the strategy each seed selects, under its own context.
+              grouped (group-by
+                       (fn [id]
+                         (let [spec (by-id id)
+                               ctx  (reload-ctx host specs spec #{id} opts)
+                               sel  (strategy/select spec ctx chain)]
+                           (if (r/err? sel) :hot/none (strategy/-strategy-id (:ok sel)))))
+                       (sort seeds))
+              reports (mapv (fn [[_sid ids]]
+                              (let [group (set ids)
+                                    spec  (by-id (first (sort group)))
+                                    ctx   (reload-ctx host specs spec group opts)]
+                                (strategy/reload! spec ctx)))
+                            grouped)]
+          (cond-> (merge-reports reports opts)
+            (seq slept) (assoc :hot/dormant slept
+                               :hot/dormant-hint (dormant-hint slept))))))))
 
 (defn reload-addon!
   "Reload ONE addon by id, cascading to its dependents. This is what the
@@ -299,6 +318,7 @@
 
    opts: {:trigger        :manual | :ns-reload | :file-change
           :ns-reloaded?   true when the namespaces were already reloaded
+          :force?         re-read the seeds' roots even when disk is unchanged
           :mount-opts     forwarded to mount! (e.g. :resolve-config, :license-gate)
           :solve-opts     forwarded to solve  (e.g. :rules)
           :strategies     strategy chain override
