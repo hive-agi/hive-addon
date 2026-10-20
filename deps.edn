@@ -33,7 +33,7 @@
                        ;; mutation); hive-schemas synthesizes those facets from
                        ;; the malli schemas in hive-addon.hot.schema. Test-only:
                        ;; the published lib stays a leaf library.
-                       io.github.hive-agi/hive-test {:mvn/version "0.4.11"}
+                       io.github.hive-agi/hive-test {:mvn/version "0.5.0"}
                        io.github.hive-agi/hive-schemas {:mvn/version "0.1.40"}}
          ;; Heap cap: an uncapped JVM sizes its heap from host RAM, and an
          ;; uncapped test JVM OOM-killed the shared host twice on 2026-10-17.
