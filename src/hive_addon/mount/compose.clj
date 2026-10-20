@@ -164,7 +164,8 @@
    per-addon build.edn :config over the base resolve-config. opts:
    {:profile :rules :fail-closed-cycles :strict-select
     :resolve-config (base, default port/resolve-config-default)
-    :init-retry :on-event :sleep-fn}. Returns
+    :init-retry :on-event :sleep-fn
+    :resolve-program (program-name -> path | nil, threaded to mount!)}. Returns
    (r/ok {<compose-plan keys> :report MountReport}) or the (r/err ...) from
    compose-plan. Mount failures are recorded in :report (graceful degrade)."
   ([discovered-specs layers host] (compose! discovered-specs layers host {}))
@@ -175,7 +176,8 @@
                                                         :fail-closed-cycles :strict-select]))]
      (let [{:keys [plan config-by-id]} composed
            report (boundary/mount! plan host
-                                   (assoc (select-keys opts [:init-retry :on-event :sleep-fn])
+                                   (assoc (select-keys opts [:init-retry :on-event :sleep-fn
+                                                             :resolve-program])
                                           :resolve-config
                                           (compose-config-resolver resolve-config config-by-id)))]
        (r/ok (assoc composed :report report))))))
