@@ -143,7 +143,7 @@
    zero runtime ports and silently dropped its whole MCP subdomain.
 
    So they are FOLDED into :mount-opts rather than dropped."
-  #{:resolve-config :init-retry :license-gate :on-event :sleep-fn :peer-specs})
+  #{:resolve-config :resolve-program :init-retry :license-gate :on-event :sleep-fn :peer-specs})
 
 (defn constructor-probe
   "Current root value of the constructor var `init-fn` in `init-ns`, or nil.

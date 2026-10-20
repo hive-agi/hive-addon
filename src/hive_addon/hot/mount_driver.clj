@@ -22,7 +22,9 @@
 
   hport/IMountPreflight
   (-preflight [_ plan host opts]
-    (boundary/dry-run plan host (select-keys opts [:license-gate])))
+    ;; :resolve-program rides along: a preview that cannot resolve a declared
+    ;; program would refuse every remount of an addon that requires one.
+    (boundary/dry-run plan host (select-keys opts [:license-gate :resolve-program])))
 
   hport/IMountRollback
   (-snapshot [_ host ids]
