@@ -19,15 +19,17 @@
 ;; SPDX-License-Identifier: MIT
 
 (defn assert-root-tools
-  "Run the contract over `tools` as clojure.test assertions. Returns the report."
+  "Run the contract over `tools` as clojure.test assertions. Returns the report.
+   Options: :allow-empty? (default false), :require-descriptions? (default
+   false; when true an undescribed property fails like a violation)."
   ([tools] (assert-root-tools tools {}))
-  ([tools {:keys [allow-empty?]}]
+  ([tools {:keys [allow-empty?] :as opts}]
    (let [tools (vec tools)
-         rep   (contract/report tools)]
+         rep   (contract/report tools opts)]
      (t/is (or allow-empty? (pos? (:checked rep)))
            "no tool defs to check — pass :allow-empty? true for an addon without tools")
      (doseq [tool tools
-             :let [vs (contract/violations tool)]]
+             :let [vs (contract/findings tool opts)]]
        (t/is (empty? vs)
              (str "root tool contract violated by " (contract/tool-label tool) ":\n"
                   (contract/format-findings {(contract/tool-label tool) vs}))))
@@ -35,7 +37,8 @@
 
 (defmacro deftest-root-tools
   "Define deftest `name` asserting that every tool def `tools-expr` evaluates
-   to satisfies the root-tool contract. Options: :allow-empty? (default false)."
+   to satisfies the root-tool contract. Options: :allow-empty? (default false),
+   :require-descriptions? (default false)."
   [name tools-expr & {:as opts}]
   `(t/deftest ~name
      (assert-root-tools ~tools-expr ~(or opts {}))))
