@@ -4,7 +4,9 @@
 
    A root tool needs a non-blank :name and :description and an :inputSchema of
    type \"object\" with at least one property. Anything less is a VIOLATION.
-   A property without a :description is a WARNING.
+   A property without a :description is a WARNING, promoted to a violation
+   when the caller opts in with `{:require-descriptions? true}`
+   (`--require-descriptions` on the CLI) — see `findings`.
 
    Enforcement points, all reading `RootToolDef`:
      host registration   `assert-root-tool!` / `assert-root-tools!`
@@ -102,10 +104,24 @@
            vec)
       [])))
 
+(defn findings
+  "The findings that fail `tool` under `opts`: its violations, plus its
+   undescribed-property warnings when `:require-descriptions?` is true.
+
+   The described-property check is opt-in: `RootToolDef` (what a host asserts
+   at registration) is unchanged, and an addon's CI turns the check on."
+  ([tool] (findings tool {}))
+  ([tool {:keys [require-descriptions?]}]
+   (let [vs (violations tool)]
+     (if require-descriptions?
+       (into vs (warnings tool))
+       vs))))
+
 (defn conforms?
-  "True when `tool` has no contract violations."
-  [tool]
-  (boolean (root-tool-validator tool)))
+  "True when `tool` has no contract violations. With `{:require-descriptions?
+   true}` every property must also carry a non-blank :description."
+  ([tool] (boolean (root-tool-validator tool)))
+  ([tool opts] (empty? (findings tool opts))))
 
 (defn tool-label
   "The tool's :name for messages, or a placeholder when it has none."
@@ -115,16 +131,19 @@
 
 (defn report
   "Check every tool in `tools`.
-   => {:checked n :violations {label [Finding]} :warnings {label [Finding]}}"
-  [tools]
-  (let [tools (vec tools)
-        by    (fn [f] (into (sorted-map)
-                            (keep (fn [t] (let [fs (f t)]
-                                            (when (seq fs) [(tool-label t) fs]))))
-                            tools))]
-    {:checked    (count tools)
-     :violations (by violations)
-     :warnings   (by warnings)}))
+   => {:checked n :violations {label [Finding]} :warnings {label [Finding]}}
+   With `{:require-descriptions? true}` an undescribed property is reported
+   under :violations and :warnings is empty."
+  ([tools] (report tools {}))
+  ([tools {:keys [require-descriptions?] :as opts}]
+   (let [tools (vec tools)
+         by    (fn [f] (into (sorted-map)
+                             (keep (fn [t] (let [fs (f t)]
+                                             (when (seq fs) [(tool-label t) fs]))))
+                             tools))]
+     {:checked    (count tools)
+      :violations (by #(findings % opts))
+      :warnings   (if require-descriptions? (sorted-map) (by warnings))})))
 
 (defn format-findings
   "Render {label [Finding]} as one line per finding."

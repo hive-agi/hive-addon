@@ -180,3 +180,58 @@
   (is (= 1 (:exit (check/verdict [(check/addon-tools `->good-addon)
                                   (check/addon-tools `->bad-addon)]))))
   (is (= 2 (:exit (check/verdict [(check/addon-tools 'no.such/ctor)])))))
+
+;; ── described-property check (opt-in) ───────────────────────────────────────
+
+(def ^:private undescribed
+  (assoc-in good [:inputSchema :properties "widget"] {:type "string"}))
+
+(def ^:private req {:require-descriptions? true})
+
+(deftest require-descriptions-promotes-the-warning-to-a-finding
+  (is (= [] (contract/findings undescribed)))
+  (is (= [[:inputSchema :properties "widget" :description]]
+         (mapv :path (contract/findings undescribed req))))
+  (is (contract/conforms? undescribed))
+  (is (not (contract/conforms? undescribed req)))
+  (is (contract/conforms? good req)))
+
+(deftest require-descriptions-rejects-a-blank-or-non-string-description
+  (is (seq (contract/findings (assoc-in good [:inputSchema :properties "widget" :description] "  ") req)))
+  (is (seq (contract/findings (assoc-in good [:inputSchema :properties "widget" :description] 42) req))))
+
+(deftest require-descriptions-keeps-structural-violations
+  (let [t (assoc undescribed :name "")]
+    (is (= #{[:name] [:inputSchema :properties "widget" :description]}
+           (set (map :path (contract/findings t req)))))))
+
+(deftest report-moves-warnings-into-violations-under-require-descriptions
+  (is (= {:checked 1 :violations {} :warnings {"frob" [{:path [:inputSchema :properties "widget" :description]
+                                                       :message "property has no description"}]}}
+         (contract/report [undescribed])))
+  (let [rep (contract/report [undescribed good] req)]
+    (is (= #{"frob"} (set (keys (:violations rep)))))
+    (is (empty? (:warnings rep)))))
+
+(deftest assert-root-tools-fails-an-undescribed-property-only-when-required
+  (is (= [:pass :pass] (captured-reports #(ct/assert-root-tools [undescribed]))))
+  (is (= [:pass :fail] (captured-reports #(ct/assert-root-tools [undescribed] req)))))
+
+(ct/deftest-root-tools the-macro-passes-require-descriptions [good] :require-descriptions? true)
+
+(defn ->undescribed-addon [] (->StubAddon [undescribed]))
+
+(deftest check-verdict-honours-require-descriptions
+  (let [rs [(check/addon-tools `->undescribed-addon)]]
+    (is (= 0 (:exit (check/verdict rs))))
+    (is (= 1 (:exit (check/verdict rs req))))))
+
+(deftest check-parse-args-splits-flags-from-ctors
+  (is (= {:opts req :ctors ["a/b" "c/d"] :unknown []}
+         (check/parse-args ["a/b" "--require-descriptions" "c/d"])))
+  (is (= ["--nope"] (:unknown (check/parse-args ["--nope" "a/b"]))))
+  (is (= {} (:opts (check/parse-args ["a/b"])))))
+
+(defspec require-descriptions-is-never-weaker 100
+  (prop/for-all [t (mg/generator contract/RootToolDef)]
+    (<= (count (contract/findings t)) (count (contract/findings t req)))))
