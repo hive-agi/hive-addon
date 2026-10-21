@@ -1,0 +1,5 @@
+{:all-down :down,
+ :all-ok :ok,
+ :empty :ok,
+ :mixed :degraded,
+ :one-degraded :degraded}

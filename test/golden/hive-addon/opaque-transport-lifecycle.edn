@@ -1,0 +1,14 @@
+{:empty
+ {:before nil,
+  :alive true,
+  :during "echo:",
+  :after nil,
+  :alive-after false,
+  :down-reason nil},
+ :plain
+ {:before nil,
+  :alive true,
+  :during "echo:ping",
+  :after nil,
+  :alive-after false,
+  :down-reason nil}}

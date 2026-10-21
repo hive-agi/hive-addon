@@ -1,0 +1,12 @@
+{:absent
+ {:addon/init-ns "no.such.namespace-anywhere",
+  :hot/source-kind :absent,
+  :hot/reloadable? false},
+ :directory
+ {:addon/init-ns "hive-addon.hot.source",
+  :hot/source-kind :directory,
+  :hot/reloadable? true},
+ :jar
+ {:addon/init-ns "malli.core",
+  :hot/source-kind :jar,
+  :hot/reloadable? false}}
