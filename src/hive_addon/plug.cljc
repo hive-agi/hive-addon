@@ -6,7 +6,8 @@
             [hive-addon.plug.lint :as lint]
             [hive-addon.plug.source :as src]
             [hive-dsl.result :as r]
-            [clojure.set :as set]))
+            [clojure.set :as set]
+            [malli.core :as m]))
 
 ;; SPDX-License-Identifier: MIT
 
@@ -14,10 +15,16 @@
 (def merge-configs mrg/merge-configs)
 (def lint lint/check)
 
+(def ^:private Selection
+  "{:kept #{lib} ...} partitions answered by apply-profile and drop-disabled."
+  [:set :qualified-symbol])
+
 (defn source-family
   "Coord family keyword (:local | :git | :mvn), or nil for an unknown coord."
   [coord]
   (some-> (src/coord->source coord) src/family))
+
+(m/=> source-family [:=> [:cat [:maybe [:map-of :any :any]]] [:maybe [:enum :local :git :mvn]]])
 
 (defn apply-profile
   "Partition plug libs by the named profile into {:kept #{lib} :excluded {lib reason}}."
@@ -36,6 +43,11 @@
                                 [l (if (and (seq only) (not (only l))) :not-in-profile-only :profile-excepted)]))]
         {:kept kept :excluded excluded}))))
 
+(m/=> apply-profile [:=> [:cat schema/IaddonConfig :any]
+                     [:map {:closed true}
+                      [:kept Selection]
+                      [:excluded [:map-of :qualified-symbol [:enum :not-in-profile-only :profile-excepted]]]]])
+
 (defn drop-disabled
   "Drop plugs whose :enabled? is explicitly false → {:kept #{lib} :dropped {lib :disabled}}."
   [plugs libs]
@@ -45,10 +57,18 @@
               (update acc :kept conj l)))
           {:kept #{} :dropped {}} libs))
 
+;; plugs is read for :enabled? only, so any {lib map} is the domain.
+(m/=> drop-disabled [:=> [:cat [:maybe [:map-of :qualified-symbol [:map-of :any :any]]] [:or [:set :qualified-symbol] [:sequential :qualified-symbol]]]
+                     [:map {:closed true}
+                      [:kept Selection]
+                      [:dropped [:map-of :qualified-symbol [:= :disabled]]]]])
+
 (defn plug-capabilities
   "Every capability a plug claims — singular :capability ∪ plural :capabilities."
   [plug]
   (into (if-let [c (:capability plug)] #{c} #{}) (:capabilities plug)))
+
+(m/=> plug-capabilities [:=> [:cat [:maybe [:map-of :any :any]]] [:set :any]])
 
 (defn- forbidden-capabilities [rules]
   (into #{} (for [[cap rl] rules :when (false? (:permit rl))] cap)))
@@ -83,6 +103,11 @@
       (r/ok {:selected (set/difference (set live) (set (keys (:dropped resolved))))
              :dropped  (merge denied (:dropped resolved))}))))
 
+(m/=> select-capabilities
+      [:=> [:cat schema/IaddonConfig [:or [:set :qualified-symbol] [:sequential :qualified-symbol]]]
+       [:or [:map {:closed true} [:ok [:map {:closed true} [:selected Selection] [:dropped [:map-of :qualified-symbol :map]]]]]
+            [:map {:closed true} [:error [:= :iaddon/capability-conflict]] [:conflicts [:vector :map]]]]])
+
 (defn plug-provenance
   "Per-plug field → the layer id that last set it (::layer = last layer touching the plug)."
   [layers]
@@ -92,6 +117,9 @@
                               (assoc-in a [lib ::layer] id) plug))
                     acc (:iaddon/plugs config)))
           {} layers))
+
+(m/=> plug-provenance [:=> [:cat [:sequential [:map {:closed false} [:id :any] [:config [:maybe [:map-of :any :any]]]]]]
+                       [:map-of :qualified-symbol [:map-of :keyword :any]]])
 
 (defn resolve-config
   "Resolve layers → (r/ok {:config :selected :dropped :provenance}) or the first
@@ -107,6 +135,15 @@
            :dropped    (merge (:excluded prof) (:dropped dis) (:dropped cap))
            :provenance (plug-provenance layers)})))
 
+(m/=> resolve-config
+      [:=> [:cat [:sequential [:map {:closed false} [:config [:maybe [:map-of :any :any]]]]] [:maybe [:map-of :any :any]]]
+       [:or [:map {:closed true} [:ok [:map {:closed true}
+                                       [:config schema/IaddonConfig]
+                                       [:selected [:map-of :qualified-symbol schema/Plug]]
+                                       [:dropped [:map-of :qualified-symbol :any]]
+                                       [:provenance [:map-of :qualified-symbol [:map-of :keyword :any]]]]]]
+            [:map {:closed false} [:error :qualified-keyword]]]])
+
 (defn explain
   "Resolution as a flat report — :selected libs, :dropped reasons, :provenance — or the error."
   [layers opts]
@@ -115,3 +152,9 @@
       (let [{:keys [selected dropped provenance]} (:ok res)]
         {:status :ok :selected (vec (keys selected)) :dropped dropped :provenance provenance})
       {:status :error :error (:error res) :detail (dissoc res :error)})))
+
+(m/=> explain
+      [:=> [:cat [:sequential [:map {:closed false} [:config [:maybe [:map-of :any :any]]]]] [:maybe [:map-of :any :any]]]
+       [:or [:map {:closed true} [:status [:= :ok]] [:selected [:vector :qualified-symbol]]
+             [:dropped [:map-of :qualified-symbol :any]] [:provenance [:map-of :qualified-symbol [:map-of :keyword :any]]]]
+            [:map {:closed true} [:status [:= :error]] [:error :qualified-keyword] [:detail [:map-of :keyword :any]]]]])

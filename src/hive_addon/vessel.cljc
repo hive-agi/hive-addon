@@ -23,7 +23,8 @@
    Reload-safety: `defprotocol` is not idempotent, so the declaration is
    guarded: re-evaluating this namespace will not orphan existing
    implementations."
-  (:require [hive-addon.protocol :as proto]))
+  (:require [malli.core :as m]
+            [hive-addon.protocol :as proto]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -74,6 +75,8 @@
   [x]
   (satisfies? IVessel x))
 
+(m/=> vessel? [:=> [:cat :any] :boolean])
+
 (defn vessel-addon?
   "True iff X satisfies both IAddon and IVessel. Rare: a vessel and its addon
    are normally separate objects, because the two protocols share method
@@ -81,3 +84,5 @@
   [x]
   (and (satisfies? proto/IAddon x)
        (satisfies? IVessel x)))
+
+(m/=> vessel-addon? [:=> [:cat :any] :boolean])

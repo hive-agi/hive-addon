@@ -40,7 +40,8 @@
   (:require [clojure.string :as str]
             [hive-addon.protocol :as proto]
             [hive-addon.mount.port :as port]
-            [hive-addon.mount.solve :as solve]))
+            [hive-addon.mount.solve :as solve]
+            [malli.core :as m]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -65,6 +66,25 @@
       fallback)))
 
 (defn- nil-reporter [_] nil)
+
+;; =============================================================================
+;; Value objects for the contracts below
+;; =============================================================================
+
+(def Member
+  "A normalized member map. Open: :member/config, :member/depends-on and
+   :member/prefix ride along when given."
+  [:map {:closed false}
+   [:member/addon [:fn {:error/message "should satisfy IAddon"} proto/addon?]]
+   [:member/id :any]])
+
+(def ToolDef
+  "A tool-def as the composite projects it: a map with a :name."
+  [:map {:closed false} [:name :any]])
+
+(def Collisions
+  "Tool names claimed by more than one member."
+  [:map-of :any [:vector {:min 2} :any]])
 
 ;; =============================================================================
 ;; Members — normalization and ordering
@@ -92,10 +112,14 @@
 
     :else nil))
 
+(m/=> normalize-member [:=> [:cat :any] [:maybe Member]])
+
 (defn normalize-members
   "Normalize a seq of members, dropping the ones that carry no addon."
   [ms]
   (into [] (keep normalize-member) ms))
+
+(m/=> normalize-members [:=> [:cat [:maybe [:sequential :any]]] [:vector Member]])
 
 (defn- member->spec
   "Project a member onto the subset of MountSpec keys the solver reads, so
@@ -118,6 +142,12 @@
      :cycles     (set (:cycles plan))
      :duplicates (:duplicates plan)}))
 
+(m/=> order-members [:=> [:cat [:sequential Member]]
+                      [:map {:closed true}
+                       [:ordered [:vector Member]]
+                       [:cycles [:set :any]]
+                       [:duplicates [:map-of :any pos-int?]]]])
+
 ;; =============================================================================
 ;; Tool naming
 ;; =============================================================================
@@ -138,12 +168,16 @@
       (str/replace #"[^a-z0-9]+" "_")
       (str/replace #"^_+|_+$" "")))
 
+(m/=> tool-prefix [:=> [:cat :any] [:re #"^[a-z0-9_]*$"]])
+
 (defn qualify-tool
   "Prefix one tool-def's `:name`. A blank prefix leaves the name untouched."
   [prefix tool]
   (if (str/blank? prefix)
     tool
     (update tool :name #(str prefix "_" %))))
+
+(m/=> qualify-tool [:=> [:cat [:maybe :string] ToolDef] ToolDef])
 
 (defn collisions
   "Tool names claimed by more than one member, as `{name [member-id ...]}`.
@@ -154,6 +188,8 @@
                 (let [ids (distinct (map :member/id entries))]
                   (when (> (count ids) 1) [nm (vec ids)]))))
         (group-by (comp :name :tool) named)))
+
+(m/=> collisions [:=> [:cat [:sequential [:map {:closed false} [:member/id :any] [:tool ToolDef]]]] Collisions])
 
 (defn aggregate-tools
   "Fold member tool-defs into one surface.
@@ -174,6 +210,9 @@
     {:tools      (mapv :tool named)
      :collisions (collisions named)}))
 
+(m/=> aggregate-tools [:=> [:cat [:maybe [:sequential Member]] [:maybe :keyword] [:maybe ifn?]]
+                        [:map {:closed true} [:tools [:vector ToolDef]] [:collisions Collisions]]])
+
 ;; =============================================================================
 ;; Health
 ;; =============================================================================
@@ -191,6 +230,8 @@
       (every? #(= :ok %) statuses)  :ok
       (every? #(= :down %) statuses) :down
       :else                         :degraded)))
+
+(m/=> fold-health [:=> [:cat [:sequential :keyword]] [:enum :ok :degraded :down]])
 
 (defn- member-health
   "One member's status keyword, folding an unreachable or throwing member to
@@ -324,11 +365,16 @@
                     (assoc opts :members (normalize-members members))
                     (atom {:started? false})))
 
+(m/=> composite [:=> [:cat :any [:map {:closed false} [:members {:optional true} [:maybe [:sequential :any]]]]]
+                  [:fn {:error/message "should be a CompositeAddon"} #(instance? CompositeAddon %)]])
+
 (defn composite?
   "True when `x` is a CompositeAddon. A host never needs this to MOUNT one —
    it is an IAddon like any other — but a diagnostic that walks the tree does."
   [x]
   (instance? CompositeAddon x))
+
+(m/=> composite? [:=> [:cat :any] :boolean])
 
 (defn member-ids
   "The member ids of a composite, in declaration order. `[]` for a leaf addon,
@@ -337,6 +383,8 @@
   (if (composite? x)
     (mapv :member/id (:members (:opts x)))
     []))
+
+(m/=> member-ids [:=> [:cat :any] [:vector :any]])
 
 (defn members
   "The member maps of a composite, in declaration order. `[]` for a leaf addon.
@@ -347,6 +395,8 @@
   [x]
   (if (composite? x) (vec (:members (:opts x))) []))
 
+(m/=> members [:=> [:cat :any] [:vector Member]])
+
 (defn live-members
   "The members that INITIALIZED successfully, in mount order. `[]` before
    `initialize!`, after `shutdown!`, or for a leaf addon.
@@ -355,3 +405,5 @@
    so it is also the honest answer to \"what is this catalog serving right now\"."
   [x]
   (if (composite? x) (vec (:live @(:state x))) []))
+
+(m/=> live-members [:=> [:cat :any] [:vector Member]])
