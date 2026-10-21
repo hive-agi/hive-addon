@@ -1,0 +1,30 @@
+{:many-rivals
+ {:openers {:sinks #{"host"}, :sources #{"host"}},
+  :providers {:tools #{"host"}, :sinks #{"d" "c"}},
+  :vacant {"host" #{:sources}},
+  :unconsumed {},
+  :over-subscribed {}},
+ :none
+ {:openers {},
+  :providers {},
+  :vacant {},
+  :unconsumed {},
+  :over-subscribed {}},
+ :rivals
+ {:openers {:sinks #{"host"}, :sources #{"host"}},
+  :providers {:tools #{"host"}, :sources #{"a" "b"}, :orphan #{"b"}},
+  :vacant {"host" #{:sinks}},
+  :unconsumed {"b" #{:orphan}},
+  :over-subscribed {"host" {:sources #{"a" "b"}}}},
+ :single-tenant
+ {:openers {:sinks #{"host"}, :sources #{"host"}},
+  :providers {:tools #{"host"}, :sources #{"a"}},
+  :vacant {"host" #{:sinks}},
+  :unconsumed {},
+  :over-subscribed {}},
+ :vacant
+ {:openers {:sinks #{"host"}, :sources #{"host"}},
+  :providers {:tools #{"host"}},
+  :vacant {"host" #{:sinks :sources}},
+  :unconsumed {},
+  :over-subscribed {}}}

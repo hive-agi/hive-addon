@@ -200,5 +200,15 @@
    :hive.capability/spec     CommandSpec
    :hive.capability/example  CommandExample})
 
+;; status reads only :schema, so its domain is any map, not a full CommandSpec:
+;; it is the derivation that DEFINES declared-ness, and must answer for a
+;; summary-only spec as much as for a schematized one.
+(m/=> status      [:=> [:cat [:map {:closed false} [:schema {:optional true} :any]]]
+                   [:enum :capability/declared :capability/undeclared]])
+(m/=> index       [:=> [:cat CapabilityManifest] [:map-of CommandName CommandSpec]])
+(m/=> declared    [:=> [:cat CapabilityManifest] [:set CommandName]])
+(m/=> schematized [:=> [:cat CapabilityManifest] [:set CommandName]])
+(m/=> undeclared  [:=> [:cat CapabilityManifest] [:set CommandName]])
+
 (m/=> command-enum [:=> [:cat CapabilityManifest] [:vector :any]])
 (m/=> coverage     [:=> [:cat CapabilityManifest] [:map [:declared-pct :double]]])
