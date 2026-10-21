@@ -8,7 +8,8 @@
    not fail. `--require-descriptions` turns an undescribed property into a
    violation. Exit 2 when an argument cannot be resolved or called."
   (:require [hive-addon.protocol :as proto]
-            [hive-addon.tool-contract :as contract]))
+            [hive-addon.tool-contract :as contract]
+            [malli.core :as m]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -23,6 +24,13 @@
       {:ctor ctor-sym :tools (vec (proto/tools (ctor)))})
     (catch Throwable e
       {:ctor ctor-sym :error (str (.getSimpleName (class e)) ": " (ex-message e))})))
+
+(def ^:private CtorResult
+  [:or
+   [:map {:closed true} [:ctor :any] [:tools [:vector :any]]]
+   [:map {:closed true} [:ctor :any] [:error :string]]])
+
+(m/=> addon-tools [:=> [:cat [:or :string :symbol]] CtorResult])
 
 (defn verdict
   "Pure: per-ctor results -> {:exit n :lines [str]}. `opts` is passed to
@@ -45,6 +53,15 @@
                                                       (contract/format-findings warnings)))))
                       reports))})))
 
+;; :lines is a lazy concat, so it is sequential rather than a vector.
+(def ^:private Verdict
+  [:map {:closed true} [:exit [:enum 0 1 2]] [:lines [:sequential :string]]])
+
+(m/=> verdict
+      [:function
+       [:=> [:cat [:sequential CtorResult]] Verdict]
+       [:=> [:cat [:sequential CtorResult] [:maybe [:map-of :any :any]]] Verdict]])
+
 (def ^:private flags
   {"--require-descriptions" {:require-descriptions? true}})
 
@@ -59,6 +76,13 @@
           {:opts {} :ctors [] :unknown []}
           args))
 
+(m/=> parse-args
+      [:=> [:cat [:maybe [:sequential :string]]]
+       [:map {:closed true}
+        [:opts [:map-of :keyword :any]]
+        [:ctors [:vector :string]]
+        [:unknown [:vector :string]]]])
+
 (defn -main
   [& args]
   (let [{:keys [opts ctors unknown]} (parse-args args)
@@ -72,3 +96,7 @@
     (doseq [l lines] (println l))
     (shutdown-agents)
     (System/exit exit)))
+
+;; -main ends in System/exit, so it never returns; the contract states its
+;; argument domain (CLI strings) and the :nil it would answer were exit stubbed.
+(m/=> -main [:=> [:cat [:* :string]] :nil])

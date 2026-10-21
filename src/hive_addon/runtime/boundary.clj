@@ -80,6 +80,10 @@
   []
   (->LocalFs))
 
+(def ^:private Fs [:fn {:error/message "should satisfy IRuntimeFs"} #(satisfies? IRuntimeFs %)])
+
+(m/=> local-fs [:=> [:cat] Fs])
+
 (defrecord RecordingFs [log fail-on]
   IRuntimeFs
   (delete-tree! [_ path]
@@ -100,6 +104,11 @@
    kinds in FAIL-ON."
   ([] (recording-fs #{}))
   ([fail-on] (->RecordingFs (atom []) (set fail-on))))
+
+(m/=> recording-fs
+      [:function
+       [:=> [:cat] Fs]
+       [:=> [:cat [:or [:set :keyword] [:sequential :keyword]]] Fs]])
 
 ;; =============================================================================
 ;; Plan interpreter (open by effect kind)
@@ -147,6 +156,8 @@
   [outcomes]
   (every? :ok? outcomes))
 
+(m/=> plan-ok? [:=> [:cat [:sequential rs/Outcome]] :boolean])
+
 ;; =============================================================================
 ;; Provisioning an injected addon
 ;; =============================================================================
@@ -156,6 +167,12 @@
    host supplies in EXTRA, a map of addon id to RuntimeDecls."
   [spec extra]
   (vec (concat (:addon/runtime spec) (get extra (:addon/id spec)))))
+
+;; Declarations are passed through unvalidated (provision-runtime! is the
+;; one that judges each), so the element shape is open here.
+(m/=> declarations
+      [:=> [:cat [:map-of :any :any] [:maybe [:map-of :any [:maybe [:sequential :any]]]]]
+       [:vector :any]])
 
 (defn- hook-value
   [instance k]
@@ -217,6 +234,10 @@
     (catch Throwable t
       (failed-runtime decl (or (ex-message t) (str t))))))
 
+;; Never throws, and judges DECL itself, so DECL is :any; an invalid one is
+;; answered as a failed RuntimeReport (:runtime/client :unknown when absent).
+(m/=> provision-runtime! [:=> [:cat [:map-of :any :any] :any :any] rs/RuntimeReport])
+
 (defn provisioner
   "A host's provisioning seam for hive-addon.mount: {:provision (fn [spec
    instance]) :deprovision (fn [addon-id]) :installed (fn [])}.
@@ -262,5 +283,9 @@
             :ok? (every? :ok? reports)
             :runtimes reports})))
      :installed (fn [] @installed)}))
+
+(m/=> provisioner
+      [:=> [:cat [:map {:closed false} [:home :string]]]
+       [:map {:closed true} [:provision ifn?] [:deprovision ifn?] [:installed ifn?]]])
 
 (m/=> run-plan! [:=> [:cat :map rs/Plan] [:vector rs/Outcome]])

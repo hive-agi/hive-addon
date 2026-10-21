@@ -21,7 +21,12 @@
             [hive-addon.opaque.codec :as codec]
             [hive-addon.opaque.schema :as os]
             [hive-addon.opaque.serve :as serve]
-            [malli.core :as m]))
+            [malli.core :as m]
+            [hive-addon.opaque.transport :as t]
+            [hive-addon.opaque.addon]
+            [hive-addon.opaque.transport.inproc]
+            [hive-addon.opaque.transport.subprocess]
+            [hive-addon.protocol :as proto]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -121,4 +126,53 @@
       [:function
        [:=> [:cat [:sequential :any] :symbol] :string]
        [:=> [:cat [:sequential :any] :symbol :symbol] :string]])
+
+;; =============================================================================
+;; transports and the proxy
+;; =============================================================================
+
+;; Protocol satisfactions are built by their own factories, never drawn.
+(def Transport
+  [:fn {:error/message "should satisfy ITransport"} #(satisfies? t/ITransport %)])
+
+(def Addon
+  [:fn {:error/message "should satisfy IAddon"} #(satisfies? proto/IAddon %)])
+
+(def OpaqueAddon
+  [:fn {:error/message "should be an OpaqueAddon"} #(instance? hive_addon.opaque.addon.OpaqueAddon %)])
+
+(m/=> hive-addon.opaque.transport/down-reason [:=> [:cat :any] [:maybe :string]])
+
+(m/=> hive-addon.opaque.transport.inproc/fn-transport [:=> [:cat ifn?] Transport])
+
+;; Deadlines are nil when the spec leaves them to the transport's default.
+(m/=> hive-addon.opaque.transport.subprocess/subprocess-transport
+      [:function
+       [:=> [:cat [:sequential :string]] Transport]
+       [:=> [:cat [:sequential :string]
+             [:maybe [:map {:closed false}
+                      [:request-timeout-ms {:optional true} [:maybe os/TimeoutMs]]
+                      [:init-timeout-ms {:optional true} [:maybe os/TimeoutMs]]]]]
+        Transport]])
+
+;; call! never throws: every failure is an error response. Its args are
+;; whatever the IAddon method was handed.
+(m/=> hive-addon.opaque.addon/call! [:=> [:cat Transport os/Op :any] os/Response])
+(m/=> hive-addon.opaque.addon/call-result! [:=> [:cat Transport os/Op :any :any] :any])
+;; The spec is read lazily by the IAddon methods (addon-id reads :opaque/id), so
+;; it is any map here; os/OpaqueSpec is enforced where a spec is BUILT.
+(m/=> hive-addon.opaque.addon/opaque-addon [:=> [:cat [:map-of :any :any] Transport] OpaqueAddon])
+
+;; optional answers f's value, or the fallback: its shape is the method's.
+(m/=> hive-addon.opaque.serve/optional [:=> [:cat Addon ifn? :any] :any])
+;; serve! loops on stdin until EOF or a shutdown request, then answers nil.
+(m/=> hive-addon.opaque.serve/serve! [:=> [:cat Addon] :nil])
+
+(m/=> hive-addon.opaque/subprocess-addon [:=> [:cat os/OpaqueSpec] OpaqueAddon])
+(m/=> hive-addon.opaque/serving-transport [:=> [:cat Addon] Transport])
+(m/=> hive-addon.opaque/inproc-addon [:=> [:cat [:map-of :any :any] Addon] OpaqueAddon])
+(m/=> hive-addon.opaque/line-transport [:=> [:cat ifn?] Transport])
+;; nil when the manifest carries no :addon/config.
+(m/=> hive-addon.opaque/addon-ctor [:=> [:cat [:map-of :any :any]] [:maybe OpaqueAddon]])
+
 
