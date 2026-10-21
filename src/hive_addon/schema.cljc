@@ -161,6 +161,49 @@
    addon type; at minimum the host echoes :addon/id and :addon/config."
   [:map {:closed false}])
 
+(def SchemaForm
+  "What the registry-aware wrappers accept as ?s: a registry key (:addon/id,
+   :int), a predicate symbol or fn (string?), a vector form ([:map ...]), or an
+   already-compiled Schema. Shape only: whether a key RESOLVES is the
+   wrapper's own answer, so the contract never pre-empts it."
+  [:or :keyword :symbol fn? [:vector {:min 1} :any]
+   [:fn {:error/message "should be a compiled malli Schema"} m/schema?]])
+
+(def CompiledSchema
+  "A compiled malli Schema instance."
+  [:fn {:error/message "should be a compiled malli Schema"} m/schema?])
+
+(def Explanation
+  "malli's explain map, as `explain` answers for a non-conforming value."
+  [:map {:closed false}
+   [:schema :any]
+   [:value :any]
+   [:errors [:sequential :any]]])
+
+(def Humanized
+  "malli.error/humanize output: a vector of messages for a leaf, a map for a
+   map or sequence with keyed failures."
+  [:or [:sequential :any] [:map-of :any :any]])
+
+(def ValidationResult
+  "The hive-dsl Result `validate*` answers: (r/ok x), or an (r/err category
+   {:explanation humanized}) whose category is a qualified keyword."
+  [:or
+   [:map {:closed true} [:ok :any]]
+   [:map {:closed true} [:error :qualified-keyword] [:explanation [:maybe Humanized]]]])
+
+(def AddonAuditResult
+  "What `validate-addon` answers: (r/ok addon), or the FIRST failing method as
+   a contract violation (with the offending :value when it returned one) or as
+   a method that threw."
+  [:or
+   [:map {:closed true} [:ok :any]]
+   [:map {:closed true}
+    [:error [:enum :addon/contract-violation :addon/method-threw]]
+    [:method :qualified-keyword]
+    [:value {:optional true} :any]
+    [:explanation [:maybe Humanized]]]])
+
 ;; =============================================================================
 ;; Local composite registry — malli defaults + this lib's :addon/* schemas
 ;; =============================================================================
@@ -315,3 +358,18 @@
    'hive-addon.protocol/health            [:=> [:cat :any] HealthReport]
    'hive-addon.protocol/excluded-tools    [:=> [:cat :any] ExcludedTools]
    'hive-addon.protocol/hooks             [:=> [:cat :any] HookMap]})
+
+;; =============================================================================
+;; Contracts for the registry wrappers and the Result bridge
+;; =============================================================================
+
+(m/=> schema [:=> [:cat SchemaForm] CompiledSchema])
+(m/=> validate [:=> [:cat SchemaForm :any] :boolean])
+(m/=> explain [:=> [:cat SchemaForm :any] [:maybe Explanation]])
+(m/=> humanize-errors [:=> [:cat SchemaForm :any] [:maybe Humanized]])
+(m/=> validate* [:function
+                 [:=> [:cat SchemaForm :any] ValidationResult]
+                 [:=> [:cat SchemaForm :any :qualified-keyword] ValidationResult]])
+;; The addon is :any on purpose: auditing a non-addon is a REPORTED violation
+;; (required method not implemented), never a contract throw.
+(m/=> validate-addon [:=> [:cat :any] AddonAuditResult])

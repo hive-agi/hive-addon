@@ -256,6 +256,56 @@
   "x -> boolean. Compiled ExtensionPoint validator."
   (m/validator (schema ExtensionPoint) {:registry registry}))
 
+;; =============================================================================
+;; Contracts
+;; =============================================================================
+
+(def ^:private Spec
+  "A manifest as the derivations read it: an open map whose :addon/id is the
+   AddonId every answer is keyed by. Every other key they read is defaulted, so
+   narrowing to MountSpec would delete those branches from the domain."
+  [:map {:closed false} [:addon/id s/AddonId]])
+
+(def ^:private Specs
+  "A spec collection. compose-plan hands over vectors; a caller holding a set
+   of specs is equally served, so both are the domain."
+  [:or [:sequential Spec] [:set Spec]])
+
+(def ^:private ByCapability
+  "{capability #{addon-id}}."
+  [:map-of :keyword [:set :string]])
+
+(def ^:private ByAddon
+  "{addon-id #{capability}}."
+  [:map-of :string [:set :keyword]])
+
+(def ^:private OverSubscribed
+  "{addon-id {capability #{tenant-id}}}, each tenant set holding 2 or more."
+  [:map-of :string [:map-of :keyword [:set {:min 2} :string]]])
+
+;; The values are the spec's own ExtensionPoints, keyed by their capability.
+(m/=> index           [:=> [:cat Spec] [:map-of :keyword [:map {:closed false} [:extension/capability :keyword]]]])
+(m/=> openers         [:=> [:cat Specs] ByCapability])
+(m/=> providers       [:=> [:cat Specs] ByCapability])
+(m/=> vacant          [:=> [:cat Specs] ByAddon])
+(m/=> unconsumed      [:=> [:cat Specs] ByAddon])
+(m/=> over-subscribed [:=> [:cat Specs] OverSubscribed])
+(m/=> report          [:=> [:cat Specs]
+                       [:map {:closed true}
+                        [:openers         ByCapability]
+                        [:providers       ByCapability]
+                        [:vacant          ByAddon]
+                        [:unconsumed      ByAddon]
+                        [:over-subscribed OverSubscribed]]])
+
+(m/=> schema          [:=> [:cat s/SchemaForm] s/CompiledSchema])
+(m/=> validate        [:=> [:cat s/SchemaForm :any] :boolean])
+(m/=> explain         [:=> [:cat s/SchemaForm :any] [:maybe s/Explanation]])
+(m/=> humanize-errors [:=> [:cat s/SchemaForm :any] [:maybe s/Humanized]])
+(m/=> validate*       [:function
+                       [:=> [:cat s/SchemaForm :any] s/ValidationResult]
+                       [:=> [:cat s/SchemaForm :any :qualified-keyword] s/ValidationResult]])
+
 (m/=> points-of          [:=> [:cat [:map-of :any :any]] [:sequential :any]])
 (m/=> point-capabilities [:=> [:cat [:map-of :any :any]] [:set :keyword]])
 (m/=> tenants            [:=> [:cat [:sequential :any] :keyword] [:set :string]])
