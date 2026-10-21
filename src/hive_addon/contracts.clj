@@ -46,7 +46,8 @@
             [hive-addon.registry.schema]
             [hive-addon.registry.tools]
             [hive-addon.wire]
-            [malli.core :as m]))
+            [malli.core :as m]
+            [hive-addon.hot.strategy :as strategy]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -303,6 +304,31 @@
 (m/=> hive-addon.protocol/healthy? [:=> [:cat :any] :boolean])
 (m/=> hive-addon.protocol/degraded? [:=> [:cat :any] :boolean])
 (m/=> hive-addon.protocol/down? [:=> [:cat :any] :boolean])
+
+;; =============================================================================
+;; hot.strategy: the OCP reload chain (portable, so contracted from here)
+;; =============================================================================
+
+(def Strategy (satisfies-schema strategy/IReloadStrategy "IReloadStrategy"))
+
+(def Chain [:vector Strategy])
+
+(m/=> hive-addon.hot.strategy/default-strategies [:=> [:cat] Chain])
+(m/=> hive-addon.hot.strategy/installed-strategies [:=> [:cat] Chain])
+(m/=> hive-addon.hot.strategy/register-strategy! [:=> [:cat Strategy] Chain])
+;; nil falls back to registered-plus-built-in, per the docstring.
+(m/=> hive-addon.hot.strategy/install-strategies! [:=> [:cat [:maybe [:sequential Strategy]]] Chain])
+(m/=> hive-addon.hot.strategy/reset-strategies! [:=> [:cat] Chain])
+(m/=> hive-addon.hot.strategy/strategy-by-id [:=> [:cat [:sequential Strategy] :any] [:maybe Strategy]])
+(m/=> hive-addon.hot.strategy/select
+      [:function
+       [:=> [:cat Spec AnyMap] [:or [:map {:closed true} [:ok Strategy]] [:map [:error :qualified-keyword]]]]
+       [:=> [:cat Spec AnyMap [:sequential Strategy]]
+        [:or [:map {:closed true} [:ok Strategy]] [:map [:error :qualified-keyword]]]]])
+;; Never throws: every outcome, refusal and blow-up included, is a report.
+(m/=> hive-addon.hot.strategy/reload!
+      [:=> [:cat Spec AnyMap]
+       [:map {:closed false} [:hot/strategy :any] [:ok? :boolean] [:mounted [:sequential AnyMap]]]])
 
 (def WireValue
   "What json-safe folds anything into: nil, string, boolean, number, keyword,

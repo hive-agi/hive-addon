@@ -38,7 +38,9 @@
             [hive-dsl.result :as r]
             [hive-addon.wire :as wire]
             [hive-addon.hot.report :as verdict]
-            [clojure.string :as str]))
+            [clojure.string :as str]
+            [malli.core :as m]
+            [hive-addon.hot.schema :as hs]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -78,6 +80,16 @@
   "Is hive-hot on the classpath?"
   []
   (some? (hot-var 'hive-hot.core/reg-hot)))
+
+;; Contract shapes for this facade. A host is any IMountHost (or nil for a
+;; driver that ignores it), so it is :any; the specs and ids are what the
+;; cascade reads, and the reports are the hot.schema value objects.
+(def ^:private AnyMap [:map-of :any :any])
+(def ^:private Specs [:or [:sequential AnyMap] [:set AnyMap]])
+(def ^:private Ids [:or [:set :any] [:sequential :any]])
+(def ^:private Opts [:maybe AnyMap])
+
+(m/=> available? [:=> [:cat] :boolean])
 
 (defn- require-reload!
   "Fallback namespace reloader for when hive-hot is absent: reload each namespace
@@ -127,6 +139,12 @@
        (fn [_ns-strs] (reload!))
        require-reload!))))
 
+(m/=> ns-reloader
+      [:function
+       [:=> [:cat] ifn?]
+       [:=> [:cat [:maybe [:sequential :any]]] ifn?]
+       [:=> [:cat [:maybe [:sequential :any]] Opts] ifn?]])
+
 ;; =============================================================================
 ;; Context
 ;; =============================================================================
@@ -155,6 +173,10 @@
   (some-> (find-ns (symbol (str init-ns)))
           (ns-resolve (symbol (str init-fn)))
           var-get))
+
+;; The probe answers a var's root VALUE, whatever the constructor var holds,
+;; or nil when the namespace or var is not loaded.
+(m/=> constructor-probe [:=> [:cat [:or :string :symbol] [:or :string :symbol]] :any])
 
 (defn- seed-roots
   "Classpath source dirs of the seed addons — what the namespace reload is
@@ -218,6 +240,8 @@
          (if (next ids) " are" " is")
          " dormant: nothing was reloaded now. The next activation mounts the current code;"
          " run `hot activate addon=" (first ids) "` to load it immediately.")))
+
+(m/=> dormant-hint [:=> [:cat [:maybe Ids]] [:maybe :string]])
 
 (defn- dormant-report
   "Every seed is dormant: nothing is mounted to reload, and the next activation
@@ -312,6 +336,8 @@
             (seq slept) (assoc :hot/dormant slept
                                :hot/dormant-hint (dormant-hint slept))))))))
 
+(m/=> reload-seeds! [:=> [:cat :any Specs Ids [:? Opts]] hs/RemountReport])
+
 (defn reload-addon!
   "Reload ONE addon by id, cascading to its dependents. This is what the
    `hive hot reload <addon-id>` command drives.
@@ -328,6 +354,8 @@
   [host specs addon-id & [opts]]
   (reload-seeds! host specs #{addon-id} opts))
 
+(m/=> reload-addon! [:=> [:cat :any Specs :any [:? Opts]] hs/RemountReport])
+
 (defn reload-namespace!
   "Reload every addon whose constructor namespace is `ns-str`, plus dependents.
    This is what a hive-hot component callback drives, so :ns-reloaded? defaults
@@ -340,10 +368,14 @@
                            :ns-reloaded? true}
                           opts))))
 
+(m/=> reload-namespace! [:=> [:cat :any Specs :any [:? Opts]] hs/RemountReport])
+
 (defn reload-all!
   "Reload every mounted addon, in dependency order."
   [host specs & [opts]]
   (reload-seeds! host specs (into #{} (map :addon/id) specs) opts))
+
+(m/=> reload-all! [:=> [:cat :any Specs [:? Opts]] hs/RemountReport])
 
 ;; =============================================================================
 ;; Wiring into hive-hot
@@ -386,6 +418,8 @@
      :hot/no-reload no-reload
      :ok? true}))
 
+(m/=> plan [:=> [:cat :any Specs [:? Opts]] hs/HotReport])
+
 (defn hot!
   "Wire `specs` into hive-hot so that reloading an addon's constructor namespace
    remounts that addon and its dependents.
@@ -425,6 +459,8 @@
         (cond-> (assoc preview :hot/available? true :ok? (empty? errors))
           (seq errors) (assoc :errors errors))))))
 
+(m/=> hot! [:=> [:cat :any Specs [:? Opts]] hs/HotReport])
+
 (defn unhot!
   "Deregister every addon in `specs` from hive-hot. No-op without hive-hot."
   [specs]
@@ -434,6 +470,13 @@
         {:hot/available? true :ok? true
          :hot/unregistered (mapv :addon/id specs)})
     {:hot/available? false :ok? true :hot/unregistered []}))
+
+(m/=> unhot!
+      [:=> [:cat Specs]
+       [:map {:closed true}
+        [:hot/available? :boolean]
+        [:ok? :boolean]
+        [:hot/unregistered [:vector :any]]]])
 
 (defn status
   "Current hot-reload status: hive-hot availability, its component registry, and
@@ -456,6 +499,14 @@
      :hot/no-reload (mapv str (sort no-reload))
      :hot/hive-hot (when hot-status (wire/json-safe (hot-status)))}))
 
+(m/=> status
+      [:=> [:cat]
+       [:map {:closed true}
+        [:hot/available? :boolean]
+        [:hot/strategies [:vector :any]]
+        [:hot/no-reload [:vector :string]]
+        [:hot/hive-hot [:maybe [:map-of :any :any]]]]])
+
 ;; =============================================================================
 ;; Re-exports — the facade surface
 ;; =============================================================================
@@ -474,43 +525,72 @@
   ([specs seed-ids] (cascade/dependents specs seed-ids))
   ([specs seed-ids opts] (cascade/dependents specs seed-ids opts)))
 
+(m/=> dependents
+      [:function
+       [:=> [:cat Specs Ids] [:set :any]]
+       [:=> [:cat Specs Ids Opts] [:set :any]]])
+
 (defn affected-plan
   "hive-addon.hot.cascade/affected-plan — the ordered slice a reload drives."
   ([specs seed-ids] (cascade/affected-plan specs seed-ids))
   ([specs seed-ids opts] (cascade/affected-plan specs seed-ids opts)))
+
+(m/=> affected-plan
+      [:function
+       [:=> [:cat Specs Ids] [:map {:closed false} [:ordered [:vector AnyMap]] [:hot/affected-ids [:set :any]]]]
+       [:=> [:cat Specs Ids Opts] AnyMap]])
 
 (defn spec-source
   "hive-addon.hot.source/spec-source — where a spec's constructor ns lives."
   [spec]
   (source/spec-source spec))
 
+(m/=> spec-source
+      [:=> [:cat AnyMap]
+       [:map {:closed false} [:addon/id :any] [:hot/source-kind hs/SourceKind] [:hot/reloadable? :boolean]]])
+
 (defn watchable-dirs
   "hive-addon.hot.source/watchable-dirs — the :local/root source dirs to watch."
   [specs]
   (source/watchable-dirs specs))
+
+(m/=> watchable-dirs [:=> [:cat Specs] [:set :string]])
 
 (defn register-strategy!
   "hive-addon.hot.strategy/register-strategy! — OCP: add a reload strategy."
   [strategy]
   (strategy/register-strategy! strategy))
 
+;; The strategy re-exports answer whatever the canonical chain answers; the
+;; chain's own contract (hive-addon.contracts) states its element shape, and
+;; hive-addon.hot-test pins the delegation by substituting the chain.
+(m/=> register-strategy! [:=> [:cat :some] [:vector :any]])
+
 (defn install-strategies!
   "hive-addon.hot.strategy/install-strategies! — replace the strategy chain."
   [strategies]
   (strategy/install-strategies! strategies))
+
+(m/=> install-strategies! [:=> [:cat [:maybe [:sequential :any]]] [:vector :any]])
 
 (defn installed-strategies
   "hive-addon.hot.strategy/installed-strategies — the live strategy chain."
   []
   (strategy/installed-strategies))
 
+(m/=> installed-strategies [:=> [:cat] [:vector :any]])
+
 (defn reset-strategies!
   "hive-addon.hot.strategy/reset-strategies! — restore the built-in chain."
   []
   (strategy/reset-strategies!))
+
+(m/=> reset-strategies! [:=> [:cat] [:vector :any]])
 
 (defn default-strategies
   "hive-addon.hot.strategy/default-strategies — a FRESH built-in chain, rebuilt
    against the current protocol var."
   []
   (strategy/default-strategies))
+
+(m/=> default-strategies [:=> [:cat] [:vector :any]])
