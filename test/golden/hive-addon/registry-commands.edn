@@ -1,0 +1,23 @@
+{:contribute-only
+ {:store
+  {"analysis" {"check" "lint", "fix" "lint", "graph" "carto"},
+   "memory" {"index" "carto"}},
+  :events
+  [{:type :contribute, :tool-name "analysis", :addon-id "lint"}
+   {:type :contribute, :tool-name "analysis", :addon-id "carto"}
+   {:type :contribute, :tool-name "memory", :addon-id "carto"}]},
+ :retract-all
+ {:store {"analysis" {"check" "lint", "fix" "lint"}, "memory" {}},
+  :events
+  [{:type :contribute, :tool-name "analysis", :addon-id "lint"}
+   {:type :contribute, :tool-name "analysis", :addon-id "carto"}
+   {:type :contribute, :tool-name "memory", :addon-id "carto"}
+   {:type :retract, :tool-name "analysis", :addon-id "carto"}
+   {:type :retract, :tool-name "memory", :addon-id "carto"}]},
+ :retract-one
+ {:store {"analysis" {"graph" "carto"}, "memory" {"index" "carto"}},
+  :events
+  [{:type :contribute, :tool-name "analysis", :addon-id "lint"}
+   {:type :contribute, :tool-name "analysis", :addon-id "carto"}
+   {:type :contribute, :tool-name "memory", :addon-id "carto"}
+   {:type :retract, :tool-name "analysis", :addon-id "lint"}]}}

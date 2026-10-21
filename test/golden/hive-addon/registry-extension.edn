@@ -1,0 +1,23 @@
+{:empty
+ {:returned [],
+  :keys [],
+  :probes
+  #:cap{:dec {:available? false, :at-10 nil, :or-default :absent},
+        :inc {:available? false, :at-10 nil, :or-default :absent},
+        :missing
+        {:available? false, :at-10 nil, :or-default :absent}}},
+ :one
+ {:returned [:cap/inc],
+  :keys [:cap/inc],
+  :probes
+  #:cap{:dec {:available? false, :at-10 nil, :or-default :absent},
+        :inc {:available? true, :at-10 11, :or-default :present},
+        :missing
+        {:available? false, :at-10 nil, :or-default :absent}}},
+ :two
+ {:returned [:cap/dec :cap/inc],
+  :keys [:cap/dec :cap/inc],
+  :probes
+  #:cap{:dec {:available? true, :at-10 9, :or-default :present},
+        :inc {:available? true, :at-10 11, :or-default :present},
+        :missing {:available? false, :at-10 nil, :or-default :absent}}}}
