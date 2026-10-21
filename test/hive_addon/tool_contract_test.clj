@@ -232,6 +232,59 @@
   (is (= ["--nope"] (:unknown (check/parse-args ["--nope" "a/b"]))))
   (is (= {} (:opts (check/parse-args ["a/b"])))))
 
+;; ── manifest-driven ctors (--manifests) ──────────────────────────────────
+
+(deftest manifest-ctors-keeps-only-tools-manifests
+  (is (= ["a.addon/addon-ctor" "b.init/create"]
+         (check/manifest-ctors
+          [{:addon/init-ns "b.init" :addon/init-fn "create" :addon/capabilities #{:tools}}
+           {:addon/init-ns "a.addon" :addon/init-fn "addon-ctor" :addon/capabilities #{:tools :health-reporting}}
+           {:addon/init-ns "c.host" :addon/init-fn "addon-ctor" :addon/capabilities #{:vessel}}
+           {:addon/init-ns "a.addon" :addon/init-fn "addon-ctor" :addon/capabilities #{:tools}}
+           {:addon/capabilities #{:tools}}]))))
+
+(deftest with-manifest-ctors-is-inert-without-the-flag
+  (is (= {:calls [["x/y" []]]}
+         (check/with-manifest-ctors {:opts {} :ctors ["x/y"]}
+           #(throw (ex-info "must not read" {}))))))
+
+(deftest with-manifest-ctors-unions-explicit-and-found
+  (is (= {:calls [["x/y" []] ["a/b" [{}]]]}
+         (check/with-manifest-ctors
+           {:opts {:manifests? true} :ctors ["x/y"]}
+           (constantly {:manifests [{:addon/init-ns "a" :addon/init-fn "b" :addon/capabilities #{:tools}}
+                                    {:addon/init-ns "x" :addon/init-fn "y" :addon/capabilities #{:tools}}]
+                        :errors []})))))
+
+(defn ->config-addon [config] (when (map? config) (->good-addon)))
+
+(deftest addon-tools-passes-the-mounter-config-arg
+  (is (= 1 (count (:tools (check/addon-tools `->config-addon [{}])))))
+  (is (:error (check/addon-tools `->config-addon)))
+  (is (re-find #"did not return an IAddon" (:error (check/addon-tools `->config-addon [nil])))))
+
+(deftest with-manifest-ctors-refuses-an-empty-or-broken-gate
+  (is (= 2 (:exit (check/with-manifest-ctors {:opts {:manifests? true} :ctors []}
+                    (constantly {:manifests [] :errors []})))))
+  (is (= 2 (:exit (check/with-manifest-ctors {:opts {:manifests? true} :ctors ["x/y"]}
+                    (constantly {:manifests [] :errors ["bad.edn: EOF"]}))))))
+
+(deftest read-manifests-reads-a-dir-and-reports-a-bad-file
+  (let [dir (doto (.toFile (java.nio.file.Files/createTempDirectory
+                            "manifests" (make-array java.nio.file.attribute.FileAttribute 0)))
+              .deleteOnExit)]
+    (spit (java.io.File. dir "a.edn") (pr-str {:addon/init-ns "a" :addon/init-fn "b" :addon/capabilities #{:tools}}))
+    (spit (java.io.File. dir "z.edn") "{:unclosed")
+    (spit (java.io.File. dir "readme.txt") "ignored")
+    (let [{:keys [manifests errors]} (check/read-manifests (str dir))]
+      (is (= ["a/b"] (check/manifest-ctors manifests)))
+      (is (= 1 (count errors))))
+    (is (= {:manifests [] :errors []} (check/read-manifests (str dir "/missing"))))))
+
+(deftest parse-args-knows-the-manifests-flag
+  (is (= {:opts {:manifests? true} :ctors [] :unknown []}
+         (check/parse-args ["--manifests"]))))
+
 (defspec require-descriptions-is-never-weaker 100
   (prop/for-all [t (mg/generator contract/RootToolDef)]
     (<= (count (contract/findings t)) (count (contract/findings t req)))))
