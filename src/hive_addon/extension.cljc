@@ -103,6 +103,8 @@
   [spec]
   (into {} (map (juxt :extension/capability identity)) (points-of spec)))
 
+(m/=> index [:=> [:cat [:map-of :any :any]] [:map-of :keyword [:map-of :any :any]]])
+
 ;; =============================================================================
 ;; Promote: pure derivations over a spec set
 ;; =============================================================================
@@ -115,6 +117,8 @@
                     acc (point-capabilities spec)))
           {} specs))
 
+(m/=> openers [:=> [:cat [:sequential [:map-of :any :any]]] [:map-of :keyword [:set :string]]])
+
 (defn providers
   "`specs` -> {capability #{addon-id}}: who OFFERS each capability."
   [specs]
@@ -122,6 +126,8 @@
             (reduce (fn [a c] (update a c (fnil conj #{}) (:addon/id spec)))
                     acc (:addon/capabilities spec #{})))
           {} specs))
+
+(m/=> providers [:=> [:cat [:sequential [:map-of :any :any]]] [:map-of :keyword [:set :string]]])
 
 (defn tenants
   "The addon ids in `specs` that fill `capability`, excluding the opener itself."
@@ -153,6 +159,8 @@
                          (when (seq empty-points) [(:addon/id spec) empty-points])))
                      specs)))
 
+(m/=> vacant [:=> [:cat [:sequential [:map-of :any :any]]] [:map-of :string [:set :keyword]]])
+
 (defn- accounted
   "The capabilities `specs` reference at all: opened as a point, required of a
    host, or standard to the protocol."
@@ -177,6 +185,8 @@
                            (when (seq stray) [(:addon/id spec) stray])))
                        specs))))
 
+(m/=> unconsumed [:=> [:cat [:sequential [:map-of :any :any]]] [:map-of :string [:set :keyword]]])
+
 (defn over-subscribed
   "`specs` -> {addon-id {capability #{tenant-id}}}: `:cardinality/one` points
    filled by more than one provider. Specs sharing an :addon/id contribute to
@@ -194,6 +204,9 @@
                          (when (seq clashes) [(:addon/id spec) clashes])))
                      specs)))
 
+(m/=> over-subscribed [:=> [:cat [:sequential [:map-of :any :any]]]
+                        [:map-of :string [:map-of :keyword [:set :string]]]])
+
 (defn report
   "`specs` -> {:openers :providers :vacant :unconsumed :over-subscribed}.
 
@@ -204,6 +217,14 @@
    :vacant          (vacant specs)
    :unconsumed      (unconsumed specs)
    :over-subscribed (over-subscribed specs)})
+
+(m/=> report [:=> [:cat [:sequential [:map-of :any :any]]]
+               [:map {:closed true}
+                [:openers         [:map-of :keyword [:set :string]]]
+                [:providers       [:map-of :keyword [:set :string]]]
+                [:vacant          [:map-of :string [:set :keyword]]]
+                [:unconsumed      [:map-of :string [:set :keyword]]]
+                [:over-subscribed [:map-of :string [:map-of :keyword [:set :string]]]]]])
 
 ;; =============================================================================
 ;; Local composite registry: hive-addon.schema registry + :extension/* schemas
@@ -227,20 +248,28 @@
   [?s]
   (m/schema ?s {:registry registry}))
 
+(m/=> schema [:=> [:cat s/SchemaForm] s/CompiledSchema])
+
 (defn validate
   "Registry-aware validate. True or false."
   [?s x]
   (m/validate ?s x {:registry registry}))
+
+(m/=> validate [:=> [:cat s/SchemaForm :any] :boolean])
 
 (defn explain
   "Registry-aware explain. Nil on success, error map on failure."
   [?s x]
   (m/explain ?s x {:registry registry}))
 
+(m/=> explain [:=> [:cat s/SchemaForm :any] [:maybe s/Explanation]])
+
 (defn humanize-errors
   "Human-readable error data for x against ?s, or nil if x conforms."
   [?s x]
   (some-> (explain ?s x) me/humanize))
+
+(m/=> humanize-errors [:=> [:cat s/SchemaForm :any] [:maybe s/Humanized]])
 
 (defn validate*
   "Validate x against ?s, bridging to hive-dsl Result.
@@ -251,6 +280,10 @@
    (if (validate ?s x)
      (r/ok x)
      (r/err category {:explanation (humanize-errors ?s x)}))))
+
+(m/=> validate* [:function
+                 [:=> [:cat s/SchemaForm :any] s/ValidationResult]
+                 [:=> [:cat s/SchemaForm :any :qualified-keyword] s/ValidationResult]])
 
 (def valid-point?
   "x -> boolean. Compiled ExtensionPoint validator."
