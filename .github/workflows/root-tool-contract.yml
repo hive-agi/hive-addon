@@ -11,15 +11,30 @@ name: root-tool-contract
 #         addon-ctors: my.addon/->addon
 #         require-descriptions: true   # optional: fail on an undescribed property
 #
+# Or let the repo's own mount manifests name the ctors (no per-repo list):
+#
+#         manifests: true
+#
+# Repos without this workflow (Gitea, or the shared staging-gate.yml) run the
+# same check as one CI line:
+#
+#   clojure -Sdeps '{:aliases {:rtc {:main-opts ["-m" "hive-addon.tool-contract.check"]}}}' -M:rtc --manifests
+#
 # The repo's classpath must carry hive-addon >= the release that ships
 # hive-addon.tool-contract (directly or transitively).
 on:
   workflow_call:
     inputs:
       addon-ctors:
-        description: Space-separated zero-arg fns returning an IAddon, e.g. "my.addon/->addon".
-        required: true
+        description: Space-separated zero-arg fns returning an IAddon, e.g. "my.addon/->addon". Optional when manifests is true.
+        required: false
         type: string
+        default: ""
+      manifests:
+        description: Also check every ctor named by the repo's own resources/META-INF/hive-addons/*.edn whose :addon/capabilities has :tools (fails if none is found).
+        required: false
+        type: boolean
+        default: false
       aliases:
         description: deps.edn aliases to add to the classpath, e.g. ":dev" (no main-opts are used from them).
         required: false
@@ -55,6 +70,7 @@ jobs:
           ALIASES: ${{ inputs.aliases }}
           CTORS: ${{ inputs.addon-ctors }}
           FLAGS: ${{ inputs.require-descriptions && '--require-descriptions' || '' }}
+          MANIFESTS: ${{ inputs.manifests && '--manifests' || '' }}
         run: |
           clojure -Sdeps '{:aliases {:root-tool-contract {:main-opts ["-m" "hive-addon.tool-contract.check"]}}}' \
-            "-M${ALIASES}:root-tool-contract" $FLAGS $CTORS
+            "-M${ALIASES}:root-tool-contract" $FLAGS $MANIFESTS $CTORS

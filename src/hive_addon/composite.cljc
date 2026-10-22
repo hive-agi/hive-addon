@@ -40,7 +40,9 @@
   (:require [clojure.string :as str]
             [hive-addon.protocol :as proto]
             [hive-addon.mount.port :as port]
-            [hive-addon.mount.solve :as solve]))
+            [hive-addon.mount.solve :as solve]
+            [malli.core :as m]
+            [hive-addon.schema :as s]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -131,9 +133,9 @@
    own tools by the composite's id, so repeating the shared stem would spell
    every tool twice."
   [id]
-  (-> (str id)
-      (str/split #"[./]")
-      last
+  ;; `(or ... "")`: an id made only of separators (\".\", \"./\") splits to no
+  ;; segment at all, and lower-casing nil threw instead of answering \"\".
+  (-> (or (last (str/split (str id) #"[./]")) "")
       str/lower-case
       (str/replace #"[^a-z0-9]+" "_")
       (str/replace #"^_+|_+$" "")))
@@ -355,3 +357,62 @@
    so it is also the honest answer to \"what is this catalog serving right now\"."
   [x]
   (if (composite? x) (vec (:live @(:state x))) []))
+
+;; =============================================================================
+;; Contracts
+;; =============================================================================
+
+(def Member
+  "A normalized member map, as `normalize-member` answers it. The addon is a
+   protocol satisfaction rather than a value shape, so it is checked by
+   `proto/addon?`; the id is whatever the member's own `addon-id` answers."
+  [:map {:closed false}
+   [:member/addon [:fn {:error/message "should be an IAddon"} proto/addon?]]
+   [:member/id :any]
+   [:member/config {:optional true} [:maybe [:map {:closed false}]]]
+   [:member/depends-on {:optional true} [:maybe [:or [:set :any] [:sequential :any]]]]
+   [:member/prefix {:optional true} [:maybe :string]]])
+
+(def MemberOrder
+  "What `order-members` answers: the solver's plan projected back onto members."
+  [:map {:closed true}
+   [:ordered [:vector Member]]
+   [:cycles [:set :any]]
+   [:duplicates [:map-of :any :int]]])
+
+(def Collisions
+  "Tool name -> the (two or more) member ids claiming it."
+  [:map-of [:maybe :string] [:vector {:min 2} :any]])
+
+(def NamedTool
+  "One tool-def tagged with the member that contributed it (`collisions` input)."
+  [:map {:closed false}
+   [:member/id :any]
+   [:tool [:map {:closed false}]]])
+
+(def AggregatedTools
+  [:map {:closed true}
+   [:tools [:vector s/ToolDef]]
+   [:collisions Collisions]])
+
+;; Members and maps are :any where the function's job is to FILTER: a malformed
+;; entry is dropped, never a contract throw.
+(m/=> normalize-member [:=> [:cat :any] [:maybe Member]])
+(m/=> normalize-members [:=> [:cat [:maybe [:sequential :any]]] [:vector Member]])
+(m/=> order-members [:=> [:cat [:sequential Member]] MemberOrder])
+;; Total over any id: the degenerate all-separator id answers "" (no prefix).
+(m/=> tool-prefix [:=> [:cat :any] :string])
+(m/=> qualify-tool [:=> [:cat [:maybe :string] s/ToolDef] s/ToolDef])
+(m/=> collisions [:=> [:cat [:sequential NamedTool]] Collisions])
+;; Naming is :any: everything but :flat prefixes, so the domain is not an enum.
+(m/=> aggregate-tools [:=> [:cat [:maybe [:sequential Member]] :any [:maybe ifn?]] AggregatedTools])
+;; Statuses are :any: a misbehaving member may answer a status outside the
+;; enum, and folding it to :degraded is the function's job, not a throw.
+(m/=> fold-health [:=> [:cat [:sequential :any]] s/HealthStatus])
+(m/=> composite [:=> [:cat :any [:map {:closed false}
+                                 [:members {:optional true} [:maybe [:sequential :any]]]]]
+                 [:fn {:error/message "should be a CompositeAddon"} composite?]])
+(m/=> composite? [:=> [:cat :any] :boolean])
+(m/=> member-ids [:=> [:cat :any] [:vector :any]])
+(m/=> members [:=> [:cat :any] [:vector Member]])
+(m/=> live-members [:=> [:cat :any] [:vector Member]])
