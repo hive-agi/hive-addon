@@ -1,0 +1,5 @@
+{:blank-learned [nil :none],
+ :declared-wins [{:tools [{:name "d"}], :commands {}} :declared],
+ :learned
+ [{:tools [], :commands {":carto" [":write" "read"]}} :learned],
+ :malformed-declared [nil :none]}

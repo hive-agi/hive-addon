@@ -4,7 +4,9 @@
    must be known without mounting.
 
    Portable stratum: no reader conditionals, no `for`."
-  (:require [hive-addon.wire :as wire]))
+  (:require [hive-addon.wire :as wire]
+            [hive-addon.lifecycle.schema :as ls]
+            [malli.core :as m]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -80,3 +82,34 @@
     (if (or (not (well-formed? learned)) (blank? learned))
       [nil :none]
       [(normalize learned) :learned])))
+
+;; =============================================================================
+;; Contracts
+;; =============================================================================
+;; Schemas come from hive-addon.lifecycle.schema, the lifecycle's own value
+;; objects, so the contract and the registry cannot drift apart.
+
+(def ^:private NormalSurface
+  "What `normalize` answers: both keys present, string command keys and names."
+  [:map {:closed true}
+   [:tools [:vector ls/ToolDecl]]
+   [:commands [:map-of :string [:vector {:min 1} :string]]]])
+
+;; tool-decl, normalize, blank?, well-formed? and declared are TOTAL over
+;; their input: they are what the lifecycle runs on a manifest nobody
+;; validated, and each answers nil/false rather than throwing.
+(m/=> tool-decl [:=> [:cat [:map {:closed false}]] [:map {:closed false}]])
+(m/=> normalize [:=> [:cat [:maybe [:map {:closed false}
+                                     [:tools {:optional true} [:maybe [:sequential ls/ToolDecl]]]
+                                     [:commands {:optional true}
+                                      [:maybe [:map-of :any [:sequential :any]]]]]]]
+                 NormalSurface])
+(m/=> blank? [:=> [:cat [:maybe [:map {:closed false}]]] :boolean])
+(m/=> well-formed? [:=> [:cat :any] :boolean])
+(m/=> declared [:=> [:cat [:maybe [:map {:closed false}]]] [:maybe NormalSurface]])
+(m/=> observed [:=> [:cat :any [:sequential ls/ToolDecl]
+                     [:maybe [:map-of :any [:map-of :any [:maybe [:map {:closed false}]]]]]]
+                NormalSurface])
+(m/=> resolve-surface [:=> [:cat [:maybe [:map {:closed false}]] :any]
+                       [:or [:tuple NormalSurface [:enum :declared :learned]]
+                        [:tuple :nil [:= :none]]]])

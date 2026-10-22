@@ -1,0 +1,8 @@
+{:all-eager {:eager ["a" "b" "c" "d"], :dormant [], :downgraded {}},
+ :lazy-dep-of-eager
+ {:eager ["a" "b" "c" "d"],
+  :dormant [],
+  :downgraded {"a" :required-by-eager}},
+ :lazy-leaf {:eager ["a" "b" "d"], :dormant ["c"], :downgraded {}},
+ :lazy-no-surface
+ {:eager ["a" "b" "c" "d"], :dormant [], :downgraded {"d" :no-surface}}}
