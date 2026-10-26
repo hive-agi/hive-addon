@@ -10,8 +10,7 @@
    Portable stratum: no reader conditionals, no `for`, only self-evaluating
    `:or` defaults (see hive-addon.mount.solve)."
   (:require [hive-addon.mount.solve :as solve]
-            [hive-addon.lifecycle.surface :as surface]
-            [hive-addon.lifecycle.schema :as ls]))
+            [hive-addon.lifecycle.surface :as surface]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;

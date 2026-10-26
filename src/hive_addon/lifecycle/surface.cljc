@@ -4,8 +4,7 @@
    must be known without mounting.
 
    Portable stratum: no reader conditionals, no `for`."
-  (:require [hive-addon.wire :as wire]
-            [hive-addon.lifecycle.schema :as ls]))
+  (:require [hive-addon.wire :as wire]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
