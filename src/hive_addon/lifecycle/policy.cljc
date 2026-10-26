@@ -10,10 +10,7 @@
    Portable stratum: no reader conditionals, no `for`, only self-evaluating
    `:or` defaults (see hive-addon.mount.solve)."
   (:require [hive-addon.mount.solve :as solve]
-            [hive-addon.lifecycle.surface :as surface]
-            [malli.core :as m]
-            [hive-addon.lifecycle.schema :as ls]
-            [hive-addon.schema :as s]))
+            [hive-addon.lifecycle.surface :as surface]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -205,35 +202,3 @@
                            verdicts)})
           (recur (reduce disj active free) (into evict free)))))))
 
-;; =============================================================================
-;; Contracts
-;; =============================================================================
-;; Specs are read for :addon/id, :addon/dependencies and the capability edges
-;; only, so the domain is an open map with an id rather than a full MountSpec:
-;; a lifecycle decision is asked of hand-built spec sets as often as of
-;; validated manifests. Value objects are hive-addon.lifecycle.schema's.
-
-(def ^:private SpecLike
-  [:map {:closed false} [:addon/id s/AddonId]])
-
-(def ^:private Specs [:sequential SpecLike])
-
-(def ^:private Ids [:or [:set s/AddonId] [:sequential s/AddonId]])
-
-;; A decl layer a key cannot honour is IGNORED, never refused, so every layer
-;; is :any and the answer is always a fully resolved Lifecycle.
-(m/=> resolve-lifecycle [:=> [:cat [:maybe [:map {:closed false}]] :any :any] ls/Lifecycle])
-(m/=> resolve-all [:=> [:cat Specs [:maybe [:map {:closed false}
-                                           [:overrides {:optional true}
-                                            [:maybe [:map-of s/AddonId :any]]]]]]
-                   [:map-of s/AddonId ls/Lifecycle]])
-(m/=> dependency-closure [:=> [:cat Specs Ids] [:set s/AddonId]])
-(m/=> dependent-closure [:=> [:cat Specs Ids] [:set s/AddonId]])
-(m/=> boot-partition [:=> [:cat Specs [:map-of s/AddonId [:map {:closed false}]] ifn?]
-                      [:map {:closed true}
-                       [:eager [:vector s/AddonId]]
-                       [:dormant [:vector s/AddonId]]
-                       [:downgraded [:map-of s/AddonId [:enum :no-surface :required-by-eager]]]]])
-(m/=> activation-ids [:=> [:cat Specs s/AddonId ifn?] [:vector s/AddonId]])
-(m/=> lazy-permitted? [:=> [:cat [:maybe [:map {:closed false}]]] :boolean])
-(m/=> sweep-plan [:=> [:cat :int Specs [:map-of s/AddonId ls/UseState]] ls/SweepPlan])

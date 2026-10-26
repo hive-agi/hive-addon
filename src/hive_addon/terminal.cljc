@@ -16,7 +16,8 @@
 
    Lifecycle: the backend is started during IAddon/initialize! and torn down
    during IAddon/shutdown!."
-  (:require [hive-addon.protocol :as proto]))
+  (:require [malli.core :as m]
+            [hive-addon.protocol :as proto]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -81,3 +82,5 @@
   [x]
   (and (satisfies? proto/IAddon x)
        (satisfies? ITerminalAddon x)))
+
+(m/=> terminal-addon? [:=> [:cat :any] :boolean])

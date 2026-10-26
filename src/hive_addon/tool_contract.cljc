@@ -65,6 +65,15 @@
    [:path [:vector :any]]
    [:message :string]])
 
+(def ^:private Findings [:vector Finding])
+
+(def ^:private LabelFindings
+  "{tool-label [Finding]} as `report` groups them."
+  [:map-of :string Findings])
+
+(def ^:private ReportOpts
+  [:maybe [:map {:closed false} [:require-descriptions? {:optional true} [:maybe :boolean]]]])
+
 ;; =============================================================================
 ;; Promote (pure)
 ;; =============================================================================
@@ -89,6 +98,10 @@
          distinct
          vec)))
 
+;; Every check below takes ANY value as the tool: judging an arbitrary value is
+;; the whole job, so narrowing the input would delete the case under test.
+(m/=> violations [:=> [:cat :any] Findings])
+
 (defn warnings
   "Advisory findings of `tool`: each property lacking a non-blank :description."
   [tool]
@@ -104,6 +117,8 @@
            vec)
       [])))
 
+(m/=> warnings [:=> [:cat :any] Findings])
+
 (defn findings
   "The findings that fail `tool` under `opts`: its violations, plus its
    undescribed-property warnings when `:require-descriptions?` is true.
@@ -117,17 +132,23 @@
        (into vs (warnings tool))
        vs))))
 
+(m/=> findings [:function [:=> [:cat :any] Findings] [:=> [:cat :any ReportOpts] Findings]])
+
 (defn conforms?
   "True when `tool` has no contract violations. With `{:require-descriptions?
    true}` every property must also carry a non-blank :description."
   ([tool] (boolean (root-tool-validator tool)))
   ([tool opts] (empty? (findings tool opts))))
 
+(m/=> conforms? [:function [:=> [:cat :any] :boolean] [:=> [:cat :any ReportOpts] :boolean]])
+
 (defn tool-label
   "The tool's :name for messages, or a placeholder when it has none."
   [tool]
   (let [n (when (map? tool) (:name tool))]
     (if (and (string? n) (not (str/blank? n))) n "<unnamed tool>")))
+
+(m/=> tool-label [:=> [:cat :any] NonBlankString])
 
 (defn report
   "Check every tool in `tools`.
@@ -145,6 +166,10 @@
       :violations (by #(findings % opts))
       :warnings   (if require-descriptions? (sorted-map) (by warnings))})))
 
+(m/=> report [:function
+               [:=> [:cat [:sequential :any]] [:map {:closed true} [:checked nat-int?] [:violations LabelFindings] [:warnings LabelFindings]]]
+               [:=> [:cat [:sequential :any] ReportOpts] [:map {:closed true} [:checked nat-int?] [:violations LabelFindings] [:warnings LabelFindings]]]])
+
 (defn format-findings
   "Render {label [Finding]} as one line per finding."
   [label->findings]
@@ -152,6 +177,8 @@
             (for [[label fs] label->findings
                   {:keys [path message]} fs]
               (str "  " label " " (pr-str path) ": " message))))
+
+(m/=> format-findings [:=> [:cat [:map-of :string [:sequential Finding]]] :string])
 
 ;; =============================================================================
 ;; Boundary
@@ -173,6 +200,8 @@
       (throw (contract-error {(tool-label tool) vs}))
       tool)))
 
+(m/=> assert-root-tool! [:=> [:cat :any] RootToolDef])
+
 (defn assert-root-tools!
   "Return `tools` when every tool conforms; otherwise throw ONE ex-info naming
    every offending tool (same ex-data shape as `assert-root-tool!`)."
@@ -181,6 +210,8 @@
     (if (seq vs)
       (throw (contract-error vs))
       tools)))
+
+(m/=> assert-root-tools! [:=> [:cat [:sequential :any]] [:sequential RootToolDef]])
 
 ;; =============================================================================
 ;; Compile time
@@ -199,6 +230,8 @@
   (not-any? #(or (symbol? %) (seq? %))
             (tree-seq coll? seq form)))
 
+(m/=> literal-form? [:=> [:cat :any] :boolean])
+
 (defn expansion-view
   "The tool def as far as source text decides it: a map literal with each
    non-literal contract value replaced by a conforming stand-in. nil when
@@ -211,6 +244,8 @@
                    m))
                form
                conforming-stand-ins)))
+
+(m/=> expansion-view [:=> [:cat :any] [:maybe [:map-of :any :any]]])
 
 #?(:clj
    (defmacro def-root-tool

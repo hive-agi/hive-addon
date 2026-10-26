@@ -1,6 +1,7 @@
 (ns hive-addon.resources
   "Optional MCP resource contribution contract, independent of IAddon."
-  (:require [hive-addon.schema :as schema]))
+  (:require [hive-addon.schema :as schema]
+            [malli.core :as m]))
 
 (defprotocol IAddonResources
   (list-resources [this]
@@ -21,8 +22,15 @@
                         {:addon/error :invalid-resources}))))
     []))
 
+;; The addon is any value (a legacy addon simply answers []); the promise is
+;; on the descriptors, which are validated before they are returned.
+(m/=> resources [:=> [:cat :any] schema/Resources])
+
 (defn read-resource
   "Read only a URI advertised by this addon; never invoke an undeclared handler."
   [addon uri]
   (when (some #(= uri (:uri %)) (resources addon))
     (read-resources addon uri)))
+
+;; Whatever the addon's own read answers, or nil for an unadvertised URI.
+(m/=> read-resource [:=> [:cat :any :any] :any])

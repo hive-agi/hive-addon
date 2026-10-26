@@ -1,0 +1,12 @@
+{:one
+ {:returned ["a"],
+  :names ["a"],
+  :looked {:name "a", :description "first"},
+  :count 1},
+ :overwrite
+ {:returned ["a" "a"],
+  :names ["a"],
+  :looked {:name "a", :description "new"},
+  :count 1},
+ :two
+ {:returned ["b" "a"], :names ["a" "b"], :looked {:name "b"}, :count 2}}

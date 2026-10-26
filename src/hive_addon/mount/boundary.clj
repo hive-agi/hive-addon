@@ -28,7 +28,8 @@
             [hive-addon.protocol :as proto]
             [hive-dsl.result :as r]
             [hive-addon.mount.entitlement :as ent]
-            [hive-addon.mount.injected :as injected])
+            [hive-addon.mount.injected :as injected]
+            [malli.core :as m])
   (:import [java.util.jar JarFile]
            [java.net URL]
            [java.io File]))
@@ -101,6 +102,17 @@
       parsed
       (ms/validate* ms/MountSpec (:ok parsed) :mount/spec-invalid))))
 
+;; Contract shapes for the boundary. A host is any IMountHost; a plan is what
+;; solve (or cascade/affected-plan) answers, of which mount! reads :ordered.
+(def ^:private AnyMap [:map-of :any :any])
+(def ^:private Plan [:map {:closed false} [:ordered [:sequential AnyMap]]])
+(def ^:private Opts [:maybe AnyMap])
+
+(m/=> parse-spec
+      [:=> [:cat :any]
+       [:or [:map {:closed true} [:ok ms/MountSpec]]
+            [:map [:error [:= :mount/spec-invalid]]]]])
+
 (defn discover-specs
   "Scan the classpath for META-INF/hive-addons/*.edn and parse each into a
    MountSpec. Returns {:specs [MountSpec] :errors [{:url .. :errors ..}]}.
@@ -126,6 +138,11 @@
               (update acc :errors conj {:url (str url) :errors (:explanation res)}))))))
     {:specs [] :errors []}
     (discover-manifest-urls classloader))))
+
+(m/=> discover-specs
+      [:function
+       [:=> [:cat] [:map {:closed true} [:specs [:vector ms/MountSpec]] [:errors [:vector AnyMap]]]]
+       [:=> [:cat :any] [:map {:closed true} [:specs [:vector ms/MountSpec]] [:errors [:vector AnyMap]]]]])
 
 ;; =============================================================================
 ;; Boundary helpers — constructor resolution + sibling-instance injection
@@ -172,6 +189,12 @@
            :constructor/cause-message (or (ex-message root)
                                           (.getName (class root)))})))))
 
+(m/=> resolve-constructor
+      [:=> [:cat AnyMap]
+       [:map {:closed false}
+        [:constructor/status [:enum :resolved :absent :failed :invalid]]
+        [:constructor/symbol :string]]])
+
 (defn resolve-programs
   "Resolve every declared executable through the host-supplied resolver, without
    invoking a shell. Returns the per-program locations and missing names as data.
@@ -188,6 +211,14 @@
                              (keep (fn [[name location]]
                                      (when-not location name)))
                              resolved)}))
+
+;; The resolver is an ifn (a map is the usual test double) or nil, which is
+;; fail-closed for a nonempty requirement.
+(m/=> resolve-programs
+      [:=> [:cat AnyMap [:maybe ifn?]]
+       [:map {:closed true}
+        [:programs/resolved [:map-of :string :any]]
+        [:programs/missing [:set :string]]]])
 
 (defn- dependency-ids
   "The ids `spec` depends on within `all-specs`: hard :addon/dependencies plus
@@ -552,6 +583,11 @@
        (some :restored? results)
        (assoc :restored (into [] (comp (filter :restored?) (map :addon/id)) results))))))
 
+(m/=> mount!
+      [:function
+       [:=> [:cat Plan :any] ms/MountReport]
+       [:=> [:cat Plan :any Opts] ms/MountReport]])
+
 ;; =============================================================================
 ;; dry-run — same shape, NO effects (golden-replay parity)
 ;; =============================================================================
@@ -595,6 +631,11 @@
       :skipped (into #{} (comp (remove :success?) (map :addon/id)) results)
       :ok?     (every? :success? results)})))
 
+(m/=> dry-run
+      [:function
+       [:=> [:cat Plan :any] ms/MountReport]
+       [:=> [:cat Plan :any Opts] ms/MountReport]])
+
 ;; =============================================================================
 ;; teardown! — shutdown in reverse mount order, no-nuke
 ;; =============================================================================
@@ -632,6 +673,11 @@
        (seq errors)   (assoc :errors errors)
        (seq runtimes) (assoc :runtime runtimes)))))
 
+(m/=> teardown!
+      [:function
+       [:=> [:cat :any [:sequential :any]] ms/TeardownReport]
+       [:=> [:cat :any [:sequential :any] Opts] ms/TeardownReport]])
+
 ;; =============================================================================
 ;; unregister! — plug out, through the optional IMountUnregister port
 ;; =============================================================================
@@ -653,3 +699,10 @@
                   (update acc :unregistered conj id))))
             {:unregistered [] :unsupported [] :errors []}
             addon-ids)))
+
+(m/=> unregister!
+      [:=> [:cat :any [:sequential :any]]
+       [:map {:closed true}
+        [:unregistered [:vector :any]]
+        [:unsupported [:vector :any]]
+        [:errors [:vector :string]]]])

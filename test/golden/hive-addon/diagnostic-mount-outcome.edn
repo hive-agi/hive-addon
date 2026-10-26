@@ -1,0 +1,41 @@
+{:entitlement
+ {:addon/id "probe",
+  :success? false,
+  :phase :entitlement,
+  :diagnostic
+  {:code :addon.mount/entitlement,
+   :retryable false,
+   :actions [],
+   :message
+   "Addon \"probe\" did not mount successfully at phase entitlement.\nHINT: Ask the operator to check the entitlement policy. Do not bypass the gate."}},
+ :failed
+ {:addon/id "probe",
+  :success? false,
+  :phase :failed,
+  :diagnostic
+  {:code :addon.mount/failed,
+   :retryable false,
+   :actions [],
+   :message
+   "Addon \"probe\" did not mount successfully at phase failed.\nHINT: Check that the constructor completes and returns an IAddon instance."}},
+ :programs
+ {:addon/id "probe",
+  :success? false,
+  :phase :programs,
+  :diagnostic
+  {:code :addon.mount/programs,
+   :retryable false,
+   :actions [],
+   :message
+   "Addon \"probe\" did not mount successfully at phase programs.\nHINT: Inspect the mount report before retrying."}},
+ :resolved
+ {:addon/id "probe",
+  :success? false,
+  :phase :resolved,
+  :diagnostic
+  {:code :addon.mount/resolved,
+   :retryable false,
+   :actions [],
+   :message
+   "Addon \"probe\" did not mount successfully at phase resolved.\nHINT: Check the constructor namespace and function in the mount manifest and confirm their dependencies are on the classpath."}},
+ :success {:addon/id "probe", :success? true, :phase :initialized}}

@@ -45,7 +45,9 @@
             [hive-addon.mount.injected :as injected]
             [hive-addon.mount.port :as port]
             [hive-dsl.result :as r]
-            [hive-addon.hot.drain :as drain])
+            [hive-addon.hot.drain :as drain]
+            [malli.core :as m]
+            [hive-addon.hot.schema :as hs])
   (:import [clojure.lang DynamicClassLoader RT]
            [java.io File]
            [java.net URL URLClassLoader]))
@@ -71,6 +73,14 @@
             (last (filter #(instance? DynamicClassLoader %) (loader-chain start))))]
     (or (highest (.getContextClassLoader (Thread/currentThread)))
         (highest (RT/baseLoader)))))
+
+;; Contract shapes. A host is any IMountHost, a path a string or File.
+(def ^:private AnyMap [:map-of :any :any])
+(def ^:private Specs [:sequential AnyMap])
+(def ^:private Opts [:maybe AnyMap])
+(def ^:private PathLike [:or :string [:fn #(instance? java.io.File %)]])
+
+(m/=> dynamic-loader [:=> [:cat] [:maybe [:fn #(instance? DynamicClassLoader %)]]])
 
 (defn- path-url
   ^URL [path]
@@ -109,6 +119,17 @@
                  :message (str "no DynamicClassLoader in this thread's loader chain — "
                                "run inject! from a REPL-hosted thread, or pass :loader")}))))))
 
+(def ^:private Extended
+  [:or
+   [:map {:closed true}
+    [:ok [:map {:closed true} [:url :string] [:already? :boolean] [:loader :string]]]]
+   [:map [:error [:enum :hot/path-absent :hot/no-dynamic-classloader]] [:path :string] [:message :string]]])
+
+(m/=> extend-classpath!
+      [:function
+       [:=> [:cat PathLike] Extended]
+       [:=> [:cat PathLike Opts] Extended]])
+
 ;; =============================================================================
 ;; What a path stands for
 ;; =============================================================================
@@ -125,6 +146,8 @@
         (mapv #(str (io/file f ^String %)) (or (seq (:paths m)) ["src"])))
       [(str f)])))
 
+(m/=> project-paths [:=> [:cat PathLike] [:vector :string]])
+
 (defn manifests-under
   "MountSpecs whose manifest lives under `paths` — discovered through a
    throwaway URLClassLoader over exactly those entries and no parent, so
@@ -134,6 +157,10 @@
     (with-open [cl (URLClassLoader. urls nil)]
       (boundary/discover-specs cl))))
 
+(m/=> manifests-under
+      [:=> [:cat [:sequential PathLike]]
+       [:map {:closed true} [:specs [:vector AnyMap]] [:errors [:vector AnyMap]]]])
+
 (defn dependency-delta
   "Only the injected project's resolved libs absent from the running image.
    The project is resolved alone, never merged into the image's top-level deps:
@@ -142,6 +169,14 @@
   [resolved image-libs]
   {:added (into [] (remove #(contains? image-libs (first %))) resolved)
    :skipped (into [] (filter #(contains? image-libs (first %))) resolved)})
+
+;; resolved is tools.deps' [lib coord] pairs; image-libs anything contains?
+;; answers on (a map of lib -> coord, or a set).
+(m/=> dependency-delta
+      [:=> [:cat [:sequential [:tuple :any :any]] [:or AnyMap [:set :any]]]
+       [:map {:closed true}
+        [:added [:vector [:tuple :any :any]]]
+        [:skipped [:vector [:tuple :any :any]]]]])
 
 (defn- resolve-deps!
   "Resolve only the injected project's :deps closure, minus the libs the image
@@ -278,6 +313,8 @@
           (comp (map :addon/id) (distinct) (map latest))
           candidates)))
 
+(m/=> registrable-specs [:=> [:cat Specs Specs [:set :any]] [:vector AnyMap]])
+
 (defn inject!
   "Mount the addons whose manifests live under `path` into the running `host`,
    alongside `specs` — the MountSpecs already mounted (the reload bridge's
@@ -383,6 +420,8 @@
                            :ok? (and (:ok? report) (empty? (:errors td))))
               (seq (:missing plan)) (assoc :hot/missing (:missing plan))
               (seq errors)          (assoc :errors errors))))))))
+
+(m/=> inject! [:=> [:cat :any Specs PathLike [:? Opts]] hs/InjectReport])
 
 ;; =============================================================================
 ;; eject! — plug OUT: the inverse of inject!
@@ -566,6 +605,8 @@
               (= :forced v) (assoc :hot/forced? true))
             (finally (drain/open! gate closing))))))))
 
+(m/=> eject! [:=> [:cat :any Specs :any [:? Opts]] hs/EjectReport])
+
 ;; =============================================================================
 ;; plug-out! — eject! on the railway
 ;; =============================================================================
@@ -596,3 +637,9 @@
       :else
       (r/err :hot/eject-failed
              (assoc report :message (str/join "; " (:errors report)))))))
+
+(m/=> plug-out!
+      [:=> [:cat :any Specs :any [:? Opts]]
+       [:or [:map {:closed true} [:ok hs/EjectReport]]
+            [:map [:error [:enum :hot/eject-refused :hot/eject-busy :hot/eject-unknown :hot/eject-failed]]
+             [:message [:maybe :string]]]]])

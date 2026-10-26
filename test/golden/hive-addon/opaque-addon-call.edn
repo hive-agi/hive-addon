@@ -1,0 +1,6 @@
+{:closed-pipe {:op :addon/health, :error "kernel closed the pipe"},
+ :health {:op :addon/health, :result {:status :down}},
+ :not-a-map {:op :addon/health, :error "malformed response: [1 2]"},
+ :tool {:op :addon/tool, :result {:result 8}},
+ :transport-throws {:op :addon/tool, :error "deadline missed"},
+ :unreadable {:op :addon/health, :error "EOF while reading"}}

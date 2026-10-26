@@ -1,0 +1,15 @@
+{:empty
+ {:text {:type "text", :text ""},
+  :error {:type "text", :text "", :isError true},
+  :text-error? false,
+  :error-error? true},
+ :multi
+ {:text {:type "text", :text "a\nb"},
+  :error {:type "text", :text "a\nb", :isError true},
+  :text-error? false,
+  :error-error? true},
+ :plain
+ {:text {:type "text", :text "done"},
+  :error {:type "text", :text "done", :isError true},
+  :text-error? false,
+  :error-error? true}}

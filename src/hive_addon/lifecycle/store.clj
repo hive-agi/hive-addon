@@ -8,7 +8,8 @@
             [clojure.string :as str]
             [hive-addon.lifecycle.port :as lport]
             [hive-addon.lifecycle.surface :as surface]
-            [hive-dsl.result :as r])
+            [hive-dsl.result :as r]
+            [malli.core :as m])
   (:import [java.io File]
            [java.nio.file Files StandardCopyOption CopyOption]))
 
@@ -54,3 +55,7 @@
   "An ISurfaceStore persisting under DIR (created on first save)."
   [dir]
   (->EdnDirSurfaceStore (str dir)))
+
+(m/=> edn-dir-store
+      [:=> [:cat [:or :string [:fn #(instance? java.io.File %)]]]
+       [:fn {:error/message "should satisfy ISurfaceStore"} #(satisfies? lport/ISurfaceStore %)]])

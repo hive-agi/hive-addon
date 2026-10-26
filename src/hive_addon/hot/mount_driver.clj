@@ -7,7 +7,8 @@
   (:require [hive-addon.hot.port :as hport]
             [hive-addon.mount.boundary :as boundary]
             [hive-addon.mount.port :as port]
-            [hive-dsl.result :as r]))
+            [hive-dsl.result :as r]
+            [malli.core :as m]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -41,3 +42,7 @@
    would carry the previous protocol's class object and stop satisfying it."
   []
   (->BoundaryMountDriver))
+
+(m/=> mount-driver
+      [:=> [:cat] [:fn {:error/message "should satisfy IMountDriver"}
+                   #(satisfies? hport/IMountDriver %)]])

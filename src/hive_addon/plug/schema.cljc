@@ -4,7 +4,8 @@
   (:require [malli.core :as m]
             [malli.error :as me]
             [malli.registry :as mr]
-            [hive-dsl.result :as r]))
+            [hive-dsl.result :as r]
+            [hive-addon.schema :as s]))
 
 ;; SPDX-License-Identifier: MIT
 
@@ -149,3 +150,13 @@
   ([?s x] (validate* ?s x :iaddon/schema-violation))
   ([?s x category]
    (if (validate ?s x) (r/ok x) (r/err category {:explanation (humanize-errors ?s x)}))))
+
+;; Contracts for the registry-aware wrappers above. They sit together here
+;; because the wrappers are written one per line.
+(m/=> schema [:=> [:cat s/SchemaForm] s/CompiledSchema])
+(m/=> validate [:=> [:cat s/SchemaForm :any] :boolean])
+(m/=> explain [:=> [:cat s/SchemaForm :any] [:maybe s/Explanation]])
+(m/=> humanize-errors [:=> [:cat s/SchemaForm :any] [:maybe s/Humanized]])
+(m/=> validate* [:function
+                 [:=> [:cat s/SchemaForm :any] s/ValidationResult]
+                 [:=> [:cat s/SchemaForm :any :qualified-keyword] s/ValidationResult]])

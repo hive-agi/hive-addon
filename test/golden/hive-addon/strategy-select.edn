@@ -1,0 +1,5 @@
+{:absent :restart-required,
+ :declared-inert :inert,
+ :declared-unknown :hot/unknown-strategy,
+ :directory :remount,
+ :jar :restart-required}

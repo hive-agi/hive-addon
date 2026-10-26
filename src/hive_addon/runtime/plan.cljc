@@ -196,6 +196,25 @@
     :client (:profile/client profile)
     :commands (live-commands profile dir)}])
 
+(def ^:private Values
+  "Placeholder bindings: keyword name -> substituted value (stringified)."
+  [:map-of :keyword :any])
+
+(m/=> live-plan [:=> [:cat rs/ClientProfile [:string {:min 1}]] rs/Plan])
+
+(m/=> install-plan [:=> [:cat rs/ClientProfile rs/RuntimeDecl
+                         [:map {:closed false} [:home :string] [:source-dir [:string {:min 1}]] [:values {:optional true} [:maybe Values]]]]
+                    [:or [:map {:closed true} [:dir :string] [:plan rs/Plan]]
+                         [:map {:closed true} [:error :string]]]])
+
+(m/=> vim-string [:=> [:cat :string] [:re #"^'(?s).*'$"]])
+
+(m/=> on-load-commands [:=> [:cat [:map {:closed false} [:runtime/on-load {:optional true} [:sequential :string]]] [:maybe Values]] [:vector :string]])
+
+(m/=> unbound [:=> [:cat [:map {:closed false} [:runtime/on-load {:optional true} [:sequential :string]]] [:maybe Values]] [:vector :keyword]])
+
+(m/=> placeholders [:=> [:cat :string] [:set :keyword]])
+
 (m/=> expand-home [:=> [:cat :string :string] :string])
 (m/=> install-dir [:=> [:cat rs/ClientProfile rs/RuntimeId :string] :string])
 (m/=> substitute [:=> [:cat :string [:map-of :keyword :any]] :string])

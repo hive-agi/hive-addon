@@ -10,7 +10,8 @@
    hive-addon.runtime.boundary.
 
    Rationale lives in hive memory (KG-linked), not here."
-  (:require [malli.core :as m]))
+  (:require [malli.core :as m]
+            [hive-addon.schema :as s]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -128,6 +129,10 @@
   [x]
   (m/validate RuntimeDecl x))
 
+(m/=> valid-decl? [:=> [:cat :any] :boolean])
+
 (defn explain-decl
   [x]
   (m/explain RuntimeDecl x))
+
+(m/=> explain-decl [:=> [:cat :any] [:maybe s/Explanation]])
