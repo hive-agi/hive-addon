@@ -10,7 +10,8 @@
    Portable stratum: no reader conditionals, no `for`, only self-evaluating
    `:or` defaults (see hive-addon.mount.solve)."
   (:require [hive-addon.mount.solve :as solve]
-            [hive-addon.lifecycle.surface :as surface]))
+            [hive-addon.lifecycle.surface :as surface]
+            [hive-addon.lifecycle.schema :as ls]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -201,3 +202,4 @@
                                  (map (fn [[id v]] [id (or v :dependent-active)])))
                            verdicts)})
           (recur (reduce disj active free) (into evict free)))))))
+

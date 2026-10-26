@@ -47,7 +47,8 @@
             [hive-addon.registry.tools]
             [hive-addon.wire]
             [malli.core :as m]
-            [hive-addon.hot.strategy :as strategy]))
+            [hive-addon.hot.strategy :as strategy]
+            [hive-addon.tool-contract.check]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -337,5 +338,55 @@
                                [:vector [:ref ::wire]]
                                [:map-of [:or :string :keyword] [:ref ::wire]]]}}
    ::wire])
+
+;; =============================================================================
+;; tool-contract.check: the CI entry point (.clj, contracted from here so the
+;; namespace stays loadable without malli in its runtime classpath)
+;; =============================================================================
+
+(def CtorResult
+  "What tool-contract.check/addon-tools answers: the ctor's tools, or the
+   resolve/call failure as a string."
+  [:or
+   [:map {:closed true} [:ctor :any] [:tools [:vector :any]]]
+   [:map {:closed true} [:ctor :any] [:error :string]]])
+
+;; :lines is a lazy concat, so it is sequential rather than a vector.
+(def Verdict
+  [:map {:closed true} [:exit [:enum 0 1 2]] [:lines [:sequential :string]]])
+
+(m/=> hive-addon.tool-contract.check/addon-tools
+      [:function
+       [:=> [:cat [:or :string :symbol]] CtorResult]
+       [:=> [:cat [:or :string :symbol] [:maybe [:sequential :any]]] CtorResult]])
+
+(m/=> hive-addon.tool-contract.check/verdict
+      [:function
+       [:=> [:cat [:sequential CtorResult]] Verdict]
+       [:=> [:cat [:sequential CtorResult] [:maybe [:map-of :any :any]]] Verdict]])
+
+(m/=> hive-addon.tool-contract.check/manifest-ctors
+      [:=> [:cat [:maybe [:sequential [:map {:closed false}]]]] [:vector :string]])
+
+(m/=> hive-addon.tool-contract.check/read-manifests
+      [:function
+       [:=> [:cat] [:map {:closed true} [:manifests [:vector :any]] [:errors [:vector :string]]]]
+       [:=> [:cat :string] [:map {:closed true} [:manifests [:vector :any]] [:errors [:vector :string]]]]])
+
+(m/=> hive-addon.tool-contract.check/with-manifest-ctors
+      [:function
+       [:=> [:cat [:map {:closed false}]] [:map {:closed false}]]
+       [:=> [:cat [:map {:closed false}] ifn?] [:map {:closed false}]]])
+
+(m/=> hive-addon.tool-contract.check/parse-args
+      [:=> [:cat [:maybe [:sequential :string]]]
+       [:map {:closed true}
+        [:opts [:map-of :keyword :any]]
+        [:ctors [:vector :string]]
+        [:unknown [:vector :string]]]])
+
+;; -main ends in System/exit, so it never returns; the contract states its
+;; argument domain (CLI strings) and the :nil it would answer were exit stubbed.
+(m/=> hive-addon.tool-contract.check/-main [:=> [:cat [:* :string]] :nil])
 
 (m/=> hive-addon.wire/json-safe [:=> [:cat :any] WireValue])
