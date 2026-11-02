@@ -190,6 +190,12 @@
                      (comp (mapcat :hot/source-dirs) (map str))
                      seed-specs)))))
 
+(defn- resolve-contribution
+  "The value of the var SYM names, or nil when it does not resolve. Read at
+   refresh time, after the reload, so it is the new definition."
+  [sym]
+  (some-> (find-var sym) deref))
+
 (defn- reload-ctx
   [host specs spec seeds {:keys [trigger changed-ns ns-reloaded? mount-opts
                                  solve-opts strategies reload-ns! mount-driver
@@ -211,6 +217,7 @@
      :hot/solve-opts (or solve-opts {})
      :hot/strategies strategies
      :hot/reload-ns! (or reload-ns! (ns-reloader roots {:force? force?}))
+     :hot/resolve-contribution resolve-contribution
      ;; The probe verifies the DEFAULT reloader's claim. A caller that injects
      ;; its own reloader answers for it — unless it injects a probe as well.
      :hot/ctor-probe (or ctor-probe (when-not reload-ns! constructor-probe))}))
