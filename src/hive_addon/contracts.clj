@@ -126,6 +126,10 @@
 (m/=> hive-addon.registry.commands/listener-ids [:=> [:cat] [:vector :any]])
 (m/=> hive-addon.registry.commands/contribute!
       [:=> [:cat :any :any [:map-of [:or :keyword :string :symbol] AnyMap]] [:vector :string]])
+(m/=> hive-addon.registry.commands/contribute-from!
+      [:=> [:cat :any :any :symbol ifn?] [:maybe [:vector :string]]])
+(m/=> hive-addon.registry.commands/refresh-namespaces!
+      [:=> [:cat [:sequential :any] ifn?] [:map-of :any [:vector :string]]])
 (m/=> hive-addon.registry.commands/retract! [:=> [:cat :any :any] :nil])
 (m/=> hive-addon.registry.commands/retract-all! [:=> [:cat :any] :nil])
 (m/=> hive-addon.registry.commands/get-commands [:=> [:cat :any] [:maybe [:map-of :string CommandSpec]]])
