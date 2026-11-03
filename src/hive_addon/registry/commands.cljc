@@ -186,8 +186,13 @@
   (swap! protected-paths update tool (fnil conj #{}) (branches/parse-path path))
   nil)
 
-(defn- covers-protected? [tool p]
-  (some (fn [q] (= p (subvec q 0 (min (count p) (count q))))) (get @protected-paths tool)))
+(defn- covers-protected?
+  "Does an around over P touch a protected path: above it, at it, or below it?"
+  [tool p]
+  (some (fn [q]
+          (let [n (min (count p) (count q))]
+            (= (subvec p 0 n) (subvec q 0 n))))
+        (get @protected-paths tool)))
 
 (defn graft!
   "Route PATH of TOOL to SPEC's :handler, a handler or verb map, for its :owner.
@@ -300,6 +305,18 @@
                                :guard        (:guard @branch-host)})]
         (swap! refused-now assoc tool-name refusals)
         specs))))
+
+(defn forget-composition!
+  "Forget that TOOL composed its branches, so `composed?` answers for the next read."
+  [tool]
+  (swap! refused-now dissoc tool)
+  nil)
+
+(defn composed?
+  "Has anything read TOOL's composed commands since `forget-composition!`? A tool that
+   took a call and did not never reads this store, and no branch can reach it."
+  [tool]
+  (contains? @refused-now tool))
 
 (defn contributed-tool-names
   "Every tool name carrying contributions or branches."
