@@ -231,7 +231,7 @@
     ;; DECLARED, so the union spans every member whether or not it started.
     (into (set (:capabilities opts #{}))
           (mapcat #(optional proto/capabilities (:member/addon %) #{} nil-reporter))
-          (:members opts)))
+          (concat (:members opts) (:added @state))))
 
   (initialize! [_ config]
     (if (:started? @state)
@@ -325,6 +325,62 @@
   (->CompositeAddon id
                     (assoc opts :members (normalize-members members))
                     (atom {:started? false})))
+
+(defn remove-member!
+  "Shut down member ID of a started composite and take it out of the catalog, so a
+   composite can shrink while the host keeps running. Answers
+   {:success? true :removed? bool}. A member that throws on shutdown still goes."
+  [c id]
+  (let [state  (:state c)
+        host   (:host @state)
+        known? (some #{id} (:mounted @state))]
+    (when (and host known?)
+      (try (port/shutdown! host id)
+           (catch #?(:clj Throwable :cljs :default) _ nil)))
+    (swap! state (fn [s]
+                   (let [gone? #(= id (:member/id %))]
+                     (-> s
+                         (update :live #(into [] (remove gone?) %))
+                         (update :added #(into [] (remove gone?) %))
+                         (update :mounted #(into [] (remove #{id}) %))
+                         (update :failed dissoc id)))))
+    {:success? true :removed? (boolean known?)}))
+
+(defn add-member!
+  "Mount MEMBER, an IAddon or member map, into a STARTED composite: the live half of
+   what `:members` declares at build time, so one addon can grow and change the addons
+   it holds while the host runs. A member of the same id is shut down first, which is
+   what reloading a member means. CONFIG is merged under the member's own.
+
+   Answers {:success? true :member/id id}, or {:success? false :errors [...]} with the
+   member recorded under :failed in health, as a failure at build time would be."
+  ([c member] (add-member! c member {}))
+  ([c member config]
+   (let [state (:state c)
+         m     (normalize-member member)]
+     (cond
+       (nil? m)
+       {:success? false :errors ["not an addon"]}
+
+       (not (:started? @state))
+       {:success? false :errors [(str (:id c) ": the composite is not started")]}
+
+       :else
+       (let [id (:member/id m)]
+         (remove-member! c id)
+         (let [res (init-member! (:host @state) m config)]
+           (if (:success? res)
+             (swap! state #(-> %
+                               (update :live (fnil conj []) m)
+                               (update :added (fnil conj []) m)
+                               (update :mounted (fnil conj []) id)))
+             (swap! state update :failed assoc id (:errors res)))
+           res))))))
+
+(defn member-ids
+  "The ids of the members running now, build-time and added alike."
+  [c]
+  (into [] (map :member/id) (:live @(:state c))))
 
 (defn composite?
   "True when `x` is a CompositeAddon. A host never needs this to MOUNT one —
