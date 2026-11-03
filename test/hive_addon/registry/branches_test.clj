@@ -180,22 +180,23 @@
   (hooks [_] {}))
 
 (deftest a-started-composite-grows-and-shrinks
-  (let [log (atom [])
-        c   (composite/composite "c" {:members []})]
+  (let [log  (atom [])
+        c    (composite/composite "c" {:members []})
+        live #(mapv :member/id (composite/live-members c))]
     (testing "not before it starts"
       (is (false? (:success? (composite/add-member! c (->Member "m" log false))))))
     (proto/initialize! c {})
     (is (:success? (composite/add-member! c (->Member "m" log false))))
-    (is (= ["m"] (composite/member-ids c)))
+    (is (= ["m"] (live)))
     (is (contains? (proto/capabilities c) :m))
     (testing "the same id replaces"
       (composite/add-member! c (->Member "m" log false))
-      (is (= ["m"] (composite/member-ids c)))
+      (is (= ["m"] (live)))
       (is (= [[:init "m"] [:stop "m"] [:init "m"]] @log)))
     (testing "a member that fails is recorded, not mounted"
       (is (false? (:success? (composite/add-member! c (->Member "bad" log true)))))
-      (is (= ["m"] (composite/member-ids c)))
+      (is (= ["m"] (live)))
       (is (contains? (get-in (proto/health c) [:details :failed]) "bad")))
     (is (:removed? (composite/remove-member! c "m")))
-    (is (empty? (composite/member-ids c)))
+    (is (empty? (live)))
     (is (false? (:removed? (composite/remove-member! c "absent"))))))

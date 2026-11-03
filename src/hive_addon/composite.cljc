@@ -377,11 +377,6 @@
              (swap! state update :failed assoc id (:errors res)))
            res))))))
 
-(defn member-ids
-  "The ids of the members running now, build-time and added alike."
-  [c]
-  (into [] (map :member/id) (:live @(:state c))))
-
 (defn composite?
   "True when `x` is a CompositeAddon. A host never needs this to MOUNT one —
    it is an IAddon like any other — but a diagnostic that walks the tree does."

@@ -153,7 +153,9 @@
   "Drop every branch OWNER registered. Returns the tools it touched."
   [owner]
   (let [o     (owner-id owner)
-        found (vec (for [[tool bs] @branch-store [k b] bs :when (= o (:owner b))] [tool k]))]
+        found (vec (mapcat (fn [[tool bs]]
+                             (keep (fn [[k b]] (when (= o (:owner b)) [tool k])) bs))
+                           @branch-store))]
     (doseq [[tool k] found] (swap! branch-store update tool dissoc k))
     (doseq [tool (distinct (map first found))] (swap! route-cache dissoc tool))
     (vec (distinct (map first found)))))
