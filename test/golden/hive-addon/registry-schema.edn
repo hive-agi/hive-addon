@@ -1,0 +1,11 @@
+{:merged
+ {:returned ["memory" "memory" "kg"],
+  :tools ["kg" "memory"],
+  :by-tool
+  {"kg" {"depth" {:type "integer"}},
+   "memory" {"j" {:type "integer"}, "k" {:type "string"}}}},
+ :none {:returned [], :tools [], :by-tool {}},
+ :one
+ {:returned ["memory"],
+  :tools ["memory"],
+  :by-tool {"memory" {"k" {:type "string"}}}}}

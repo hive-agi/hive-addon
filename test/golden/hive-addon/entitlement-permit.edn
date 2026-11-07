@@ -1,0 +1,5 @@
+{:allow nil,
+ :deny :deny/no-license,
+ :non-gate-fails-closed :deny/no-license-gate,
+ :throws-fails-closed :deny/gate-error,
+ :ungated-any-gate nil}

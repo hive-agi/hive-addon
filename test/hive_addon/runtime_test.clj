@@ -124,16 +124,18 @@
     (is (str/includes? src "if v:vim_did_enter"))
     (is (str/includes? src "autocmd VimEnter * ++once call s:activate()")))
   (testing "live activation extends runtimepath, then sources autoload before plugins"
-    (let [[rtp stale source] (:commands (first (rp/live-plan (:vim rp/default-profiles) "/r/it's")))]
+    (let [[rtp stale groups source warn] (:commands (first (rp/live-plan (:vim rp/default-profiles) "/r/it's")))]
       (is (str/includes? rtp "fnameescape('/r/it''s')"))
       (is (str/starts-with? stale "let g:hive_runtime_stale = exists('*getscriptinfo')")
           "a Vim without getscriptinfo() sources as before")
-      (is (str/starts-with? source "if empty(g:hive_runtime_stale) | call map(")
-          "nothing is sourced over an autoload script loaded from elsewhere")
+      (is (str/includes? stale "999999") "only a Vim9 script counts as stale")
+      (is (str/starts-with? groups "let g:hive_runtime_stale_groups = "))
+      (is (str/includes? source "index(g:hive_runtime_stale_groups, ")
+          "nothing of a stale script's group is sourced over it")
       (is (< (str/index-of source "'/r/it''s/autoload/**/*.vim'")
              (str/index-of source "'/r/it''s/plugin/**/*.vim'")))
       (is (str/includes? source "execute('source ' . fnameescape(f))"))
-      (is (str/includes? source "restart Vim to use ' . '/r/it''s'")))))
+      (is (str/includes? warn "restart Vim to use ' . '/r/it''s'")))))
 
 ;; =============================================================================
 ;; Interpreter
@@ -306,10 +308,20 @@
           home (str (io/file root "home"))
           marker (io/file root "activated.txt")
           live-marker (io/file root "live.txt")
-          on-load ["call writefile([string(get(g:, 'demo_plugin_loaded', 0)), string(v:vim_did_enter)], '{{port-file}}')"]]
+          on-load ["call writefile([string(get(g:, 'demo_plugin_loaded', 0)), string(v:vim_did_enter)], '{{port-file}}')"]
+          old-fn "function! demo#deep#old() abort\n  return 1\nendfunction\n"
+          added-fn "function! demo#deep#added() abort\n  return 2\nendfunction\n"
+          vim-list (fn [lines] (str "[" (str/join ", " (map rp/vim-string lines)) "]"))
+          live-in-vim (fn [install-dir extra]
+                        (let [live (:commands (first (rp/live-plan (:vim rp/default-profiles) install-dir)))]
+                          (str "call timer_start(50, {-> execute(" (vim-list (concat live extra)) ")})")))]
       (try
+        (spit (io/file src "autoload" "demo" "deep.vim") old-fn)
+        (spit (io/file src "autoload" "other.vim") "function! other#fn() abort\n  return 3\nendfunction\n")
         (reset! test-hooks {:demo/dir (str src) :demo/port-file (str marker)})
-        (let [p (rb/provisioner {:home home :live? false})]
+        (let [p (rb/provisioner {:home home :live? false})
+              install-dir (rp/install-dir (:vim rp/default-profiles) "demo" home)
+              installed-deep (io/file install-dir "autoload" "demo" "deep.vim")]
           (is (:ok? ((:provision p) {:addon/id "runtime.demo" :addon/runtime [(decl {:runtime/on-load on-load})]}
                      (ok-ctor nil))))
           (testing "a Vim started afterwards autoloads the runtime and runs on-load at VimEnter"
@@ -320,34 +332,50 @@
             (reset! test-hooks {:demo/dir (str src) :demo/port-file (str live-marker)})
             (is (:ok? ((:provision p) {:addon/id "runtime.demo" :addon/runtime [(decl {:runtime/on-load on-load})]}
                        (ok-ctor nil))))
-            (let [install-dir (rp/install-dir (:vim rp/default-profiles) "demo" home)
-                  live (:commands (first (rp/live-plan (:vim rp/default-profiles) install-dir)))
-                  after-enter (str "call timer_start(50, {-> execute(["
-                                   (str/join ", " (map rp/vim-string live)) "])})")]
-              (run-vim! home ["-u" "NONE" "-c" after-enter])
-              (is (= ["1" "1"] (marker-lines live-marker))
-                  "sourcing the installed plugins in a running Vim ran the loader immediately")))
-          (testing "a Vim holding the runtime's autoload script from another directory is told to restart"
-            ;; Vim keeps the first definition of an autoload function (E1073 on
-            ;; the second), so sourcing over it would mix old and new scripts.
-            (let [stale-marker (io/file root "stale.txt")
-                  old-dir (io/file root "old-src")
-                  install-dir (rp/install-dir (:vim rp/default-profiles) "demo" home)
-                  live (:commands (first (rp/live-plan (:vim rp/default-profiles) install-dir)))
-                  after-enter (str "call timer_start(50, {-> execute(["
-                                   (str/join ", " (map rp/vim-string
-                                                       (conj live (str "call writefile([string(g:hive_runtime_stale), string(exists('g:demo_plugin_loaded'))], "
-                                                                       (rp/vim-string (str stale-marker)) ")"))))
-                                   "])})")]
+            (run-vim! home ["-u" "NONE" "-c" (live-in-vim install-dir [])])
+            (is (= ["1" "1"] (marker-lines live-marker))
+                "sourcing the installed plugins in a running Vim ran the loader immediately"))
+          (testing "a function added to a script the running Vim already loaded from the install is callable after live activation"
+            (let [added-marker (io/file root "added.txt")]
+              (run-vim! home ["-u" "NORC" "--cmd" (str "set packpath=" home "/.vim")
+                              "-c" "call demo#deep#old()"
+                              "-c" (str "call writefile(" (vim-list (str/split-lines (str old-fn added-fn)))
+                                        ", " (rp/vim-string (str installed-deep)) ")")
+                              "-c" (live-in-vim install-dir
+                                                [(str "call writefile([string(exists('*demo#deep#added'))], "
+                                                      (rp/vim-string (str added-marker)) ")")])])
+              (is (= ["1"] (marker-lines added-marker))
+                  "the replaced script was sourced again, so its new function exists")
+              (spit installed-deep old-fn)))
+          (testing "a legacy script loaded from another directory is replaced, not refused"
+            (let [legacy-marker (io/file root "legacy.txt")
+                  old-dir (io/file root "old-legacy")]
               (io/make-parents (io/file old-dir "autoload" "demo" "deep.vim"))
-              (spit (io/file old-dir "autoload" "demo" "deep.vim") "\" an older copy\n")
+              (spit (io/file old-dir "autoload" "demo" "deep.vim") old-fn)
+              (spit installed-deep (str old-fn added-fn))
               (run-vim! home ["-u" "NONE"
                               "-c" (str "source " (io/file old-dir "autoload" "demo" "deep.vim"))
-                              "-c" after-enter])
-              (let [[stale loaded] (marker-lines stale-marker)]
+                              "-c" (live-in-vim install-dir
+                                                [(str "call writefile([string(g:hive_runtime_stale), string(exists('*demo#deep#added'))], "
+                                                      (rp/vim-string (str legacy-marker)) ")")])])
+              (is (= ["[]" "1"] (marker-lines legacy-marker))
+                  "Vim redefines a legacy function! from any directory")
+              (spit installed-deep old-fn)))
+          (testing "a Vim holding a Vim9 script of the runtime from another directory is told to restart"
+            (let [stale-marker (io/file root "stale.txt")
+                  old-dir (io/file root "old-src")]
+              (io/make-parents (io/file old-dir "autoload" "demo" "deep.vim"))
+              (spit (io/file old-dir "autoload" "demo" "deep.vim") "vim9script\n# an older copy\n")
+              (run-vim! home ["-u" "NONE"
+                              "-c" (str "source " (io/file old-dir "autoload" "demo" "deep.vim"))
+                              "-c" (live-in-vim install-dir
+                                                [(str "call writefile([string(g:hive_runtime_stale), string(exists('g:demo_plugin_loaded')), string(exists('*other#fn'))], "
+                                                      (rp/vim-string (str stale-marker)) ")")])])
+              (let [[stale loaded other] (marker-lines stale-marker)]
                 (is (= (str "['" old-dir "/autoload/demo/deep.vim']") stale)
                     "the loaded copy is named")
-                (is (= "0" loaded) "and nothing of the new install was sourced over it")))))
+                (is (= "0" loaded) "nothing of the stale script's group was sourced over it")
+                (is (= "1" other) "another script group of the same runtime still loads")))))
         (finally
           (reset! test-hooks {})
           (delete-tree! root))))))

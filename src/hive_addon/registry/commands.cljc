@@ -83,6 +83,22 @@
               :commands names})
     names))
 
+;; Contributions made by NAME: {[tool-name addon-id] contribution-sym}.
+;; What refresh-namespaces! re-resolves after the symbol's namespace reloads.
+(defonce ^:private sources (atom {}))
+
+(defn contribute-from!
+  "Like contribute!, but the command map is the value of the var named by
+   CONTRIBUTION-SYM, read through RESOLVE-FN (sym -> value, or nil). The name
+   is remembered, so refresh-namespaces! can re-read it after that namespace
+   is reloaded in place: handlers in the map then close over the NEW vars.
+   Returns the contributed command names, or nil when the symbol does not
+   resolve (nothing is contributed)."
+  [tool-name addon-id contribution-sym resolve-fn]
+  (when-let [commands (resolve-fn contribution-sym)]
+    (swap! sources assoc [tool-name addon-id] contribution-sym)
+    (contribute! tool-name addon-id commands)))
+
 (defn retract!
   "Remove every command ADDON-ID contributed to TOOL-NAME. Notifies listeners
    afterwards. Returns nil."
@@ -290,6 +306,27 @@
         (binding [*bypass* (conj *bypass* tool)]
           (h (assoc params :__branch_next true)))
         {:type "text" :isError true :text (str "no handler reachable for tool " tool)}))))
+
+(defn refresh-namespaces!
+  "Re-run every contribute-from! whose contribution symbol lives in one of
+   NS-STRS (reloaded namespace names) and that is still contributed. Each is
+   retracted and contributed again from (RESOLVE-FN sym), keeping its addon
+   attribution, so listeners see the change. Returns {tool-name [command ...]}
+   of what was refreshed; {} when nothing applies."
+  [ns-strs resolve-fn]
+  (let [reloaded (set (map str ns-strs))
+        live?    (fn [[tool addon-id]]
+                   (some #(= addon-id (:addon (val %))) (get @contributions tool)))]
+    (reduce (fn [acc [[tool addon-id :as k] sym]]
+              (if (and (contains? reloaded (namespace sym)) (live? k))
+                (if-let [commands (resolve-fn sym)]
+                  (do (retract! tool addon-id)
+                      (update acc tool (fnil into [])
+                              (contribute! tool addon-id commands)))
+                  acc)
+                acc))
+            {}
+            @sources)))
 
 (defn get-commands
   "The contributed command tree for TOOL-NAME with its runtime branches composed in,

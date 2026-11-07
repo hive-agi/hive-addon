@@ -21,7 +21,12 @@
             [hive-addon.opaque.codec :as codec]
             [hive-addon.opaque.schema :as os]
             [hive-addon.opaque.serve :as serve]
-            [malli.core :as m]))
+            [malli.core :as m]
+            [hive-addon.opaque.transport :as t]
+            [hive-addon.opaque.addon]
+            [hive-addon.opaque.transport.inproc]
+            [hive-addon.opaque.transport.subprocess]
+            [hive-addon.protocol :as proto]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -31,46 +36,46 @@
 ;; codec: the wire vocabulary
 ;; =============================================================================
 
-(m/=> codec/op? [:=> [:cat :any] :boolean])
+(m/=> hive-addon.opaque.codec/op? [:=> [:cat :any] :boolean])
 
-(m/=> codec/safe? [:=> [:cat :any] :boolean])
+(m/=> hive-addon.opaque.codec/safe? [:=> [:cat :any] :boolean])
 
 ;; edn-safe is total: EVERY value has a projection, because the unsafe case
 ;; projects to nil rather than throwing. That is what makes it usable on a
 ;; mount config nobody has inspected.
-(m/=> codec/edn-safe [:=> [:cat :any] os/WireVal])
+(m/=> hive-addon.opaque.codec/edn-safe [:=> [:cat :any] os/WireVal])
 
-(m/=> codec/encode [:=> [:cat :any] :string])
+(m/=> hive-addon.opaque.codec/encode [:=> [:cat :any] :string])
 
 ;; decode's argument is :any rather than [:maybe :string]: it is fed whatever
 ;; came off a pipe, and answering nil for a non-string is part of the contract.
-(m/=> codec/decode [:=> [:cat :any] :any])
+(m/=> hive-addon.opaque.codec/decode [:=> [:cat :any] :any])
 
-(m/=> codec/request
+(m/=> hive-addon.opaque.codec/request
       [:function
        [:=> [:cat os/Op] os/Request]
        [:=> [:cat os/Op :any] os/Request]])
 
-(m/=> codec/ok [:=> [:cat os/Op :any] os/Response])
+(m/=> hive-addon.opaque.codec/ok [:=> [:cat os/Op :any] os/Response])
 
-(m/=> codec/error
+(m/=> hive-addon.opaque.codec/error
       [:function
        [:=> [:cat :any] os/Response]
        [:=> [:cat :any :any] os/Response]])
 
-(m/=> codec/error? [:=> [:cat :any] :boolean])
+(m/=> hive-addon.opaque.codec/error? [:=> [:cat :any] :boolean])
 
-(m/=> codec/result [:=> [:cat :any] :any])
+(m/=> hive-addon.opaque.codec/result [:=> [:cat :any] :any])
 
-(m/=> codec/normalize-args [:=> [:cat :any] [:map-of :keyword :any]])
+(m/=> hive-addon.opaque.codec/normalize-args [:=> [:cat :any] [:map-of :keyword :any]])
 
-(m/=> codec/tool-summary [:=> [:cat [:map {:closed false}]] os/ToolSummary])
+(m/=> hive-addon.opaque.codec/tool-summary [:=> [:cat [:map {:closed false}]] os/ToolSummary])
 
-(m/=> codec/hook-summary [:=> [:cat :any] os/HookSummary])
+(m/=> hive-addon.opaque.codec/hook-summary [:=> [:cat :any] os/HookSummary])
 
-(m/=> codec/health-report [:=> [:cat :boolean [:maybe [:map {:closed false}]]] :any])
+(m/=> hive-addon.opaque.codec/health-report [:=> [:cat :boolean [:maybe [:map {:closed false}]]] :any])
 
-(m/=> codec/init-result
+(m/=> hive-addon.opaque.codec/init-result
       [:function
        [:=> [:cat :any] [:map {:closed false}]]
        [:=> [:cat :any [:sequential :string]] [:map {:closed false}]]])
@@ -83,21 +88,26 @@
 ;; than a value shape, so it is :any here and the protocol itself is the check.
 ;; What is contracted is the RESULT: a kernel's self-description must conform,
 ;; because the proxy's whole surface is projected from it.
-(m/=> serve/describe [:=> [:cat :any] os/Describe])
+(m/=> hive-addon.opaque.serve/describe [:=> [:cat :any] os/Describe])
 
-(m/=> serve/handle [:=> [:cat :any os/Request] os/Response])
+;; handle's request is any decoded MAP, not os/Request: `respond` hands it
+;; every map a pipe produced, and the `case` default answering "unknown op"
+;; for an op outside the closed vocabulary is part of the contract (a host
+;; built against a newer proxy). os/Request here made that default throw
+;; under instrumentation (wire-test the-kernel-answers-garbage-instead-of-dying).
+(m/=> hive-addon.opaque.serve/handle [:=> [:cat :any [:map-of :any :any]] os/Response])
 
-(m/=> serve/respond [:=> [:cat :any :any] os/Response])
+(m/=> hive-addon.opaque.serve/respond [:=> [:cat :any :any] os/Response])
 
-(m/=> serve/handle-line [:=> [:cat :any :any] :string])
+(m/=> hive-addon.opaque.serve/handle-line [:=> [:cat :any :any] :string])
 
 ;; =============================================================================
 ;; the facade
 ;; =============================================================================
 
-(m/=> opaque/build-argv [:=> [:cat os/OpaqueSpec] [:vector :string]])
+(m/=> hive-addon.opaque/build-argv [:=> [:cat os/OpaqueSpec] [:vector :string]])
 
-(m/=> opaque/deadlines
+(m/=> hive-addon.opaque/deadlines
       [:=> [:cat os/OpaqueSpec]
        [:map {:closed true}
         [:request-timeout-ms [:maybe os/TimeoutMs]]
@@ -106,13 +116,63 @@
 ;; The manifest an opaque addon mounts through is an ORDINARY MountSpec. This
 ;; contract is where that claim is discharged: if the opaque seam ever needed a
 ;; manifest shape of its own, this line would stop validating.
-(m/=> opaque/->manifest [:=> [:cat os/OpaqueSpec] ms/MountSpec])
+(m/=> hive-addon.opaque/->manifest [:=> [:cat os/OpaqueSpec] ms/MountSpec])
 
-(m/=> opaque/manifest->edn [:=> [:cat [:map {:closed false}]] :string])
+(m/=> hive-addon.opaque/manifest->edn [:=> [:cat [:map {:closed false}]] :string])
 
-(m/=> opaque/emit! [:=> [:cat os/OpaqueSpec :string] :string])
+(m/=> hive-addon.opaque/emit! [:=> [:cat os/OpaqueSpec :string] :string])
 
-(m/=> opaque/entry-source
+(m/=> hive-addon.opaque/entry-source
       [:function
        [:=> [:cat [:sequential :any] :symbol] :string]
        [:=> [:cat [:sequential :any] :symbol :symbol] :string]])
+
+;; =============================================================================
+;; transports and the proxy
+;; =============================================================================
+
+;; Protocol satisfactions are built by their own factories, never drawn.
+(def Transport
+  [:fn {:error/message "should satisfy ITransport"} #(satisfies? t/ITransport %)])
+
+(def Addon
+  [:fn {:error/message "should satisfy IAddon"} #(satisfies? proto/IAddon %)])
+
+(def OpaqueAddon
+  [:fn {:error/message "should be an OpaqueAddon"} #(instance? hive_addon.opaque.addon.OpaqueAddon %)])
+
+(m/=> hive-addon.opaque.transport/down-reason [:=> [:cat :any] [:maybe :string]])
+
+(m/=> hive-addon.opaque.transport.inproc/fn-transport [:=> [:cat ifn?] Transport])
+
+;; Deadlines are nil when the spec leaves them to the transport's default.
+(m/=> hive-addon.opaque.transport.subprocess/subprocess-transport
+      [:function
+       [:=> [:cat [:sequential :string]] Transport]
+       [:=> [:cat [:sequential :string]
+             [:maybe [:map {:closed false}
+                      [:request-timeout-ms {:optional true} [:maybe os/TimeoutMs]]
+                      [:init-timeout-ms {:optional true} [:maybe os/TimeoutMs]]]]]
+        Transport]])
+
+;; call! never throws: every failure is an error response. Its args are
+;; whatever the IAddon method was handed.
+(m/=> hive-addon.opaque.addon/call! [:=> [:cat Transport os/Op :any] os/Response])
+(m/=> hive-addon.opaque.addon/call-result! [:=> [:cat Transport os/Op :any :any] :any])
+;; The spec is read lazily by the IAddon methods (addon-id reads :opaque/id), so
+;; it is any map here; os/OpaqueSpec is enforced where a spec is BUILT.
+(m/=> hive-addon.opaque.addon/opaque-addon [:=> [:cat [:map-of :any :any] Transport] OpaqueAddon])
+
+;; optional answers f's value, or the fallback: its shape is the method's.
+(m/=> hive-addon.opaque.serve/optional [:=> [:cat Addon ifn? :any] :any])
+;; serve! loops on stdin until EOF or a shutdown request, then answers nil.
+(m/=> hive-addon.opaque.serve/serve! [:=> [:cat Addon] :nil])
+
+(m/=> hive-addon.opaque/subprocess-addon [:=> [:cat os/OpaqueSpec] OpaqueAddon])
+(m/=> hive-addon.opaque/serving-transport [:=> [:cat Addon] Transport])
+(m/=> hive-addon.opaque/inproc-addon [:=> [:cat [:map-of :any :any] Addon] OpaqueAddon])
+(m/=> hive-addon.opaque/line-transport [:=> [:cat ifn?] Transport])
+;; nil when the manifest carries no :addon/config.
+(m/=> hive-addon.opaque/addon-ctor [:=> [:cat [:map-of :any :any]] [:maybe OpaqueAddon]])
+
+

@@ -1,0 +1,5 @@
+{:fn "#fn",
+ :keys {"1" :one, "sym" ["#fn"], "s" [1 2]},
+ :scalar 42,
+ :set [:a :b "c"],
+ :symbol "a/b"}

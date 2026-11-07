@@ -156,9 +156,15 @@
 
 (defn validate [?s x] (m/validate ?s x {:registry registry}))
 
+(m/=> validate [:=> [:cat s/SchemaForm :any] :boolean])
+
 (defn explain [?s x] (m/explain ?s x {:registry registry}))
 
+(m/=> explain [:=> [:cat s/SchemaForm :any] [:maybe s/Explanation]])
+
 (defn humanize-errors [?s x] (some-> (explain ?s x) me/humanize))
+
+(m/=> humanize-errors [:=> [:cat s/SchemaForm :any] [:maybe s/Humanized]])
 
 (defn validate*
   "(r/ok x) or (r/err category {:explanation ...})."
@@ -167,3 +173,7 @@
    (if (validate ?s x)
      (r/ok x)
      (r/err category {:explanation (humanize-errors ?s x)}))))
+
+(m/=> validate* [:function
+                 [:=> [:cat s/SchemaForm :any] s/ValidationResult]
+                 [:=> [:cat s/SchemaForm :any :qualified-keyword] s/ValidationResult]])

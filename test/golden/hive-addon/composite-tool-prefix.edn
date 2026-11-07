@@ -1,0 +1,4 @@
+{:dotted "chain_of_thought",
+ :edge-punct "weird_name",
+ :plain "carto",
+ :slashed "search"}

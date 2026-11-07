@@ -267,8 +267,11 @@
 
 (deftest a-misstated-contract-is-caught
   ;; Non-vacuity: instrumentation must reject a call outside the domain.
+  ;; dependency-closure maps over the specs, and the spine's Specs is an open
+  ;; map collection on purpose, so the out-of-domain probe is a NON-collection
+  ;; spec argument, not a malformed entry.
   (with-instrumented
     '[hive-addon.lifecycle.policy]
     (fn [_]
       (is (thrown? clojure.lang.ExceptionInfo
-                   (pol/dependency-closure [{:no-id true}] #{"a"}))))))
+                   (pol/dependency-closure "not-a-spec-coll" #{"a"}))))))

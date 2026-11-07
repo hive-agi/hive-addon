@@ -15,7 +15,8 @@
    This namespace is the ONE place the absent-key default lives. A consumer
    that spells `(:addon/maturity spec :experimental)` itself has forked the
    default, and the fork is invisible until the two disagree."
-  (:require [hive-addon.schema :as s]))
+  (:require [hive-addon.schema :as s]
+            [malli.core :as m]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -65,6 +66,8 @@
   [spec]
   (get spec :addon/maturity default-maturity))
 
+(m/=> at-least? [:=> [:cat :any [:map-of :any :any]] :boolean])
+
 (defn at-least?
   "True when `spec` is at least as mature as `floor`.
 
@@ -75,10 +78,14 @@
   (>= (get rank (maturity spec) -1)
       (get rank floor 0)))
 
+(m/=> dormant? [:=> [:cat [:map-of :any :any]] :boolean])
+
 (defn dormant?
   "True when this spec is declared out of development."
   [spec]
   (= :dormant (maturity spec)))
+
+(m/=> declared? [:=> [:cat [:map-of :any :any]] :boolean])
 
 (defn declared?
   "True when the manifest states its maturity rather than inheriting the
@@ -89,6 +96,8 @@
    tell a deliberate :experimental from an unanswered one."
   [spec]
   (contains? spec :addon/maturity))
+
+(m/=> coerce [:=> [:cat :any] [:maybe [:map {:closed false} [:adt/type [:= :AddonMaturity]] [:adt/variant s/Maturity]]]])
 
 (defn coerce
   "A bare maturity keyword as an AddonMaturity ADT value, or nil when the
@@ -101,3 +110,7 @@
   "Re-exported so a caller can validate a maturity without reaching into the
    schema layer."
   s/Maturity)
+
+;; Contracts. A spec is any map here: an absent :addon/maturity is the case
+;; `maturity` exists to default, so the input is not narrowed to a MountSpec.
+(m/=> maturity [:=> [:cat [:map-of :any :any]] :keyword])

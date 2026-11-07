@@ -9,7 +9,8 @@
 
    `drain-gate` builds the default adapter over ONE process-wide counter map, so
    the host's dispatch wrap and eject! observe the same calls."
-  (:require [hive-addon.hot.port :as hport]))
+  (:require [hive-addon.hot.port :as hport]
+            [malli.core :as m]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -46,12 +47,27 @@
   []
   (->AtomDrainGate (atom {})))
 
+;; Contract shapes. A gate is a protocol satisfaction, built by its own
+;; factory, so it is checked rather than generated.
+(def ^:private Gate
+  [:fn {:error/message "should satisfy IDrainGate"} #(satisfies? hport/IDrainGate %)])
+
+(def ^:private Ids
+  "Addon ids as callers pass them: a vector, a seq or a set."
+  [:or [:sequential :any] [:set :any]])
+
+(def ^:private Opts [:maybe [:map-of :any :any]])
+
+(m/=> atom-drain-gate [:=> [:cat] Gate])
+
 (defonce ^:private process-calls (atom {}))
 
 (defn drain-gate
   "The IDrainGate over the process-wide counters every host wrap and eject! share."
   []
   (->AtomDrainGate process-calls))
+
+(m/=> drain-gate [:=> [:cat] Gate])
 
 ;; =============================================================================
 ;; Dispatch wrap
@@ -61,6 +77,8 @@
   "Pure. What a call refused by a closed gate is told."
   [id]
   (str "addon " id " is being unmounted; the call was not run"))
+
+(m/=> draining-message [:=> [:cat :any] :string])
 
 (defn tracked
   "HANDLER as a call to addon ID admitted through GATE (default `drain-gate`).
@@ -74,10 +92,17 @@
             (finally (hport/-leave! gate id)))
        (throw (ex-info (draining-message id) {:error :hot/draining :addon/id id}))))))
 
+(m/=> tracked
+      [:function
+       [:=> [:cat :any ifn?] ifn?]
+       [:=> [:cat Gate :any ifn?] ifn?]])
+
 (defn draining?
   "Pure. Is EX the refusal `tracked` throws for a call to a draining addon?"
   [ex]
   (= :hot/draining (:error (ex-data ex))))
+
+(m/=> draining? [:=> [:cat :any] :boolean])
 
 (defn dispatch-handler
   "HANDLER of addon ID as a host dispatches it, so every IAddon can be drained
@@ -98,6 +123,8 @@
                (if (draining? e) (refused (ex-message e) id) (throw e)))))
       counted)))
 
+(m/=> dispatch-handler [:=> [:cat :any ifn? [:? Opts]] ifn?])
+
 ;; =============================================================================
 ;; Drain: close, then wait bounded
 ;; =============================================================================
@@ -116,6 +143,8 @@
   (into {} (keep (fn [id] (let [n (hport/-in-flight gate id)]
                             (when (pos? n) [id n]))))
         ids))
+
+(m/=> in-flight [:=> [:cat Gate Ids] [:map-of :any pos-int?]])
 
 (defn drain!
   "Close GATE for IDS, then wait until none of them has a call in flight or
@@ -144,11 +173,25 @@
           (do (sleep! (min poll-ms (- drain-ms waited)))
               (recur)))))))
 
+;; The report as drain! builds it. Ids are not narrowed to AddonId here: the
+;; gate counts whatever id its host wraps a handler under. :hot/waited-ms is
+;; an :int, not nat-int?, because the clock is injected (:now).
+(def ^:private DrainReport
+  [:map {:closed true}
+   [:hot/draining [:vector :any]]
+   [:hot/in-flight [:map-of :any pos-int?]]
+   [:hot/waited-ms :int]
+   [:hot/drain-ms :int]])
+
+(m/=> drain! [:=> [:cat Gate Ids [:? Opts]] DrainReport])
+
 (defn open!
   "Admit calls to IDS through GATE again."
   [gate ids]
   (run! #(hport/-open! gate %) ids)
   nil)
+
+(m/=> open! [:=> [:cat Gate Ids] :nil])
 
 (defn drain-verdict
   "Pure. How a plug OUT reads a DrainReport: :drained when nothing is in flight,
@@ -159,9 +202,13 @@
     force?                           :forced
     :else                            :busy))
 
+(m/=> drain-verdict [:=> [:cat [:map-of :any :any] :any] [:enum :drained :forced :busy]])
+
 (defn busy-message
   "Pure. The refusal a :busy drain answers with."
   [report]
   (str "calls still in flight after " (:hot/waited-ms report) " ms: "
        (pr-str (into (sorted-map) (:hot/in-flight report)))
        "; retry, raise :drain-ms, or pass :force? true"))
+
+(m/=> busy-message [:=> [:cat [:map-of :any :any]] :string])
