@@ -37,9 +37,13 @@
 
 ;; ── each violation, one mutation at a time ──────────────────────────────────
 
-(deftest empty-properties-is-a-violation
-  (is (= #{[:inputSchema :properties]}
-         (paths (assoc-in good [:inputSchema :properties] {})))))
+(deftest a-zero-argument-tool-conforms
+  (let [t (-> good
+              (assoc-in [:inputSchema :properties] {})
+              (update :inputSchema dissoc :required))]
+    (is (contract/conforms? t))
+    (is (= [] (contract/violations t)))
+    (is (= [] (contract/warnings t)))))
 
 (deftest missing-schema-is-a-violation
   (is (= #{[:inputSchema]} (paths (dissoc good :inputSchema))))
@@ -75,9 +79,9 @@
   (prop/for-all [t (mg/generator contract/RootToolDef)]
     (contract/conforms? t)))
 
-(defspec emptying-properties-always-violates 100
+(defspec emptying-properties-always-conforms 100
   (prop/for-all [t (mg/generator contract/RootToolDef)]
-    (not (contract/conforms? (assoc-in t [:inputSchema :properties] {})))))
+    (contract/conforms? (assoc-in t [:inputSchema :properties] {}))))
 
 (defspec violations-and-conforms-agree 200
   (prop/for-all [t (gen/one-of [(mg/generator contract/RootToolDef)
@@ -87,7 +91,7 @@
 ;; ── boundary ────────────────────────────────────────────────────────────────
 
 (deftest assert-root-tools-names-every-offender-in-one-throw
-  (let [bad-a (assoc good :name "a" :inputSchema {:type "object" :properties {}})
+  (let [bad-a (assoc good :name "a" :inputSchema {:type "object"})
         bad-b (assoc good :name "b" :description "")
         e     (try (contract/assert-root-tools! [good bad-a bad-b]) nil
                    (catch clojure.lang.ExceptionInfo e e))]
@@ -104,11 +108,11 @@
   (try (binding [*ns* (the-ns 'hive-addon.tool-contract-test)] (eval form)) nil
        (catch Throwable e (or (ex-data (ex-cause e)) (ex-data e) e))))
 
-(deftest def-root-tool-refuses-an-empty-literal-schema-at-macroexpansion
+(deftest def-root-tool-refuses-a-propertyless-literal-schema-at-macroexpansion
   (let [data (compile-error
               '(hive-addon.tool-contract/def-root-tool bad-tool
                  {:name "bad" :description "d" :handler identity
-                  :inputSchema {:type "object" :properties {}}}))]
+                  :inputSchema {:type "object"}}))]
     (is (= :hive-addon/root-tool-contract (:type data)))
     (is (not (resolve 'hive-addon.tool-contract-test/bad-tool))
         "the def never happened")))
@@ -119,7 +123,7 @@
                  '(hive-addon.tool-contract/def-root-tool bad-tool-2
                     {:name "bad" :description "d" :handler identity}))))))
 
-(def ^:private dynamic-props {})
+(def ^:private dynamic-props "not-a-map")
 
 (deftest def-root-tool-checks-a-computed-schema-when-the-def-runs
   (is (= :hive-addon/root-tool-contract
@@ -150,7 +154,7 @@
 
 (deftest assert-root-tools-reports-one-failure-per-offender
   (let [types (captured-reports
-               #(ct/assert-root-tools [good (assoc-in good [:inputSchema :properties] {})]))]
+               #(ct/assert-root-tools [good (update good :inputSchema dissoc :properties)]))]
     (is (= 1 (count (filter #{:fail} types))))))
 
 (deftest assert-root-tools-fails-an-empty-seq-unless-allowed
@@ -173,7 +177,7 @@
   (hooks [_] {}))
 
 (defn ->good-addon [] (->StubAddon [good]))
-(defn ->bad-addon [] (->StubAddon [(assoc-in good [:inputSchema :properties] {})]))
+(defn ->bad-addon [] (->StubAddon [(update good :inputSchema dissoc :properties)]))
 
 (deftest check-verdict-exits-by-severity
   (is (= 0 (:exit (check/verdict [(check/addon-tools `->good-addon)]))))
