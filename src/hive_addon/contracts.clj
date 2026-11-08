@@ -41,6 +41,7 @@
             [hive-addon.plug.schema :as ps]
             [hive-addon.plug.source :as source]
             [hive-addon.protocol]
+            [hive-addon.registry.branches :as branches]
             [hive-addon.registry.commands]
             [hive-addon.registry.extension]
             [hive-addon.registry.schema]
@@ -135,6 +136,168 @@
 (m/=> hive-addon.registry.commands/get-commands [:=> [:cat :any] [:maybe [:map-of :string CommandSpec]]])
 (m/=> hive-addon.registry.commands/contributed-tool-names [:=> [:cat] [:vector :any]])
 (m/=> hive-addon.registry.commands/clear! [:=> [:cat] :nil])
+
+;; =============================================================================
+;; registry.branches: runtime branches composed onto contributed commands
+;; =============================================================================
+
+(def Tool
+  "A tool name as the command store keys it. The store keys by whatever the host
+   passes, so the branch store does too."
+  :any)
+
+(def Path
+  "A parsed branch path: one keyword per segment, [] for the whole tool."
+  [:vector :keyword])
+
+(def PathIn
+  "What a caller hands parse-path: \"belt hello\", [\"belt\" :hello], :belt or nil."
+  [:maybe [:or :keyword :string [:sequential [:or :keyword :string]]]])
+
+(def Segs
+  "A leaf path flatten-graft derives from a verb map. A key that names no keyword
+   (a number, a map) folds to nil instead of throwing."
+  [:vector [:maybe :keyword]])
+
+(def Handler
+  "Invocable code, or a var holding it, as branches/handler? reads it. Drawn as a
+   constant-answering fn, since no generator can draw code."
+  [:fn {:error/message "should be a handler (invocable, not data)"
+        :gen/schema    :string
+        :gen/fmap      (fn [s] (fn [_] {:type "text" :text s}))}
+   branches/handler?])
+
+(def Node
+  "What a graft routes: a handler, or a verb map of them, either one possibly
+   behind a var. graft! checks the top level only, so leaves stay unnarrowed."
+  [:fn {:error/message "should be a handler or a verb map"
+        :gen/schema    :string
+        :gen/fmap      (fn [s] (fn [_] {:type "text" :text s}))}
+   (fn [x] (or (branches/handler? x) (map? (branches/current x))))])
+
+(def Wrap
+  "(fn [next] handler): the middleware an around branch holds."
+  [:fn {:error/message "should be (fn [next] handler)"
+        :gen/elements  [(fn [next-handler] next-handler)]}
+   branches/handler?])
+
+(def Guard
+  "(fn [branch tool f]) -> f as dispatched, injected by the host."
+  [:fn {:error/message "should be (fn [branch tool f])"
+        :gen/elements  [(fn [_ _ f] f)]}
+   ifn?])
+
+(def HostFn
+  "A host callback: (fn [tool]) -> its handler, or its routes."
+  [:fn {:error/message "should be invocable" :gen/elements [(constantly nil)]} ifn?])
+
+(def Kind [:enum :graft :around])
+
+(def Branch
+  "One branch as the store holds it: the registration's select-keys plus who and where."
+  [:multi {:dispatch :kind}
+   [:graft [:map {:closed true}
+            [:kind [:= :graft]]
+            [:path Path]
+            [:owner :string]
+            [:handler Node]
+            [:params {:optional true} [:maybe AnyMap]]
+            [:summary {:optional true} [:maybe :string]]
+            [:description {:optional true} [:maybe :string]]]]
+   [:around [:map {:closed true}
+             [:kind [:= :around]]
+             [:path Path]
+             [:owner :string]
+             [:wrap Wrap]
+             [:order {:optional true} [:maybe :int]]
+             [:params {:optional true} [:maybe AnyMap]]
+             [:summary {:optional true} [:maybe :string]]
+             [:description {:optional true} [:maybe :string]]]]])
+
+(def Refusal
+  [:map {:closed true}
+   [:kind Kind]
+   [:path Segs]
+   [:owner :string]
+   [:reason [:enum :branch/occupied :branch/shadows-verb :branch/no-target :branch/no-host]]])
+
+(def FoldOpts
+  [:maybe [:map {:closed false}
+           [:declared {:optional true} [:maybe HostFn]]
+           [:routes {:optional true} [:maybe [:set :string]]]
+           [:guard {:optional true} [:maybe Guard]]]])
+
+(def ComposeHost
+  [:maybe [:map {:closed false}
+           [:routes {:optional true} [:maybe [:set :string]]]
+           [:next-handler {:optional true} [:maybe Handler]]
+           [:guard {:optional true} [:maybe Guard]]]])
+
+(m/=> hive-addon.registry.branches/current [:=> [:cat :any] :any])
+(m/=> hive-addon.registry.branches/handler? [:=> [:cat :any] :boolean])
+(m/=> hive-addon.registry.branches/tokens [:=> [:cat :any] [:vector [:string {:min 1}]]])
+(m/=> hive-addon.registry.branches/parse-path [:=> [:cat PathIn] Path])
+(m/=> hive-addon.registry.branches/path-str [:=> [:cat [:sequential :keyword]] :string])
+(m/=> hive-addon.registry.branches/flatten-graft [:=> [:cat Segs :any] [:vector [:tuple Segs :any]]])
+(m/=> hive-addon.registry.branches/failure
+      [:=> [:cat [:map {:closed false} [:kind Kind] [:path Path] [:owner :any]] Tool :any]
+       [:map {:closed true} [:type [:= "text"]] [:isError [:= true]] [:text :string]]])
+;; The tree is a command tree with handler leaves, but fold reads no more of it
+;; than map-ness: a leaf that is not a handler is simply not wrapped.
+(m/=> hive-addon.registry.branches/fold
+      [:=> [:cat AnyMap [:maybe [:sequential Branch]] Tool FoldOpts]
+       [:map {:closed true} [:tree AnyMap] [:refusals [:vector Refusal]]]])
+(m/=> hive-addon.registry.branches/compose
+      [:=> [:cat [:maybe [:map-of :string AnyMap]] [:maybe [:sequential Branch]] Tool ComposeHost]
+       [:map {:closed true} [:specs [:map-of :string AnyMap]] [:refusals [:vector Refusal]]]])
+
+;; registry.commands' branch store. Registration takes ANY spec and owner: refusing
+;; what cannot work is its job, answered as a verdict and never as a contract throw.
+
+(def BranchVerdict
+  [:or
+   [:map {:closed true} [:ok? [:= true]] [:tool Tool] [:path :string] [:owner :string]]
+   [:map {:closed true}
+    [:ok? [:= false]]
+    [:reason [:enum :branch/empty-path :branch/not-invocable :branch/no-owner
+              :branch/owned-by :branch/protected]]
+    [:message :string]
+    [:owner {:optional true} :string]]])
+
+(def GraftSpec
+  [:map {:closed false}
+   [:handler {:optional true} :any]
+   [:owner {:optional true} :any]
+   [:params {:optional true} [:maybe AnyMap]]
+   [:summary {:optional true} [:maybe :string]]
+   [:description {:optional true} [:maybe :string]]])
+
+(def AroundSpec
+  [:map {:closed false}
+   [:wrap {:optional true} :any]
+   [:owner {:optional true} :any]
+   [:order {:optional true} [:maybe :int]]
+   [:params {:optional true} [:maybe AnyMap]]
+   [:summary {:optional true} [:maybe :string]]
+   [:description {:optional true} [:maybe :string]]])
+
+(def BranchHost
+  [:maybe [:map {:closed false}
+           [:tool-handler {:optional true} [:maybe HostFn]]
+           [:routes {:optional true} [:maybe HostFn]]
+           [:guard {:optional true} [:maybe Guard]]]])
+
+(m/=> hive-addon.registry.commands/graft! [:=> [:cat Tool PathIn GraftSpec] BranchVerdict])
+(m/=> hive-addon.registry.commands/around! [:=> [:cat Tool PathIn AroundSpec] BranchVerdict])
+(m/=> hive-addon.registry.commands/prune! [:=> [:cat Tool PathIn :any] [:int {:min 0 :max 2}]])
+(m/=> hive-addon.registry.commands/protect! [:=> [:cat Tool PathIn] :nil])
+(m/=> hive-addon.registry.commands/branches-of [:=> [:cat Tool] [:vector Branch]])
+(m/=> hive-addon.registry.commands/branch-refusals [:=> [:cat Tool] [:vector Refusal]])
+(m/=> hive-addon.registry.commands/drop-owner-branches! [:=> [:cat :any] [:vector Tool]])
+(m/=> hive-addon.registry.commands/set-branch-host! [:=> [:cat BranchHost] :nil])
+(m/=> hive-addon.registry.commands/forget-composition! [:=> [:cat Tool] :nil])
+(m/=> hive-addon.registry.commands/composed? [:=> [:cat Tool] :boolean])
+(m/=> hive-addon.registry.commands/clear-branches! [:=> [:cat] :nil])
 
 ;; =============================================================================
 ;; cli.*: command parsing and dispatch

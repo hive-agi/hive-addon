@@ -463,6 +463,29 @@
 (m/=> composite [:=> [:cat :any [:map {:closed false}
                                  [:members {:optional true} [:maybe [:sequential :any]]]]]
                  [:fn {:error/message "should be a CompositeAddon"} composite?]])
+(def Composite
+  "A CompositeAddon instance. Drawn as an empty, unstarted composite: an instance is
+   built by its own factory, never synthesized field by field."
+  [:fn {:error/message "should be a CompositeAddon"
+        :gen/schema    :string
+        :gen/fmap      #(composite % {:members []})}
+   composite?])
+
+(def MemberResult
+  "What add-member! answers: init-member!'s verdict, or a refusal before any mount."
+  [:map {:closed true}
+   [:member/id {:optional true} :any]
+   [:success? :boolean]
+   [:errors {:optional true} [:vector :string]]])
+
+;; The member is :any for the reason normalize-member's is: a non-addon is
+;; refused in the answer, not by a contract throw.
+(m/=> add-member!
+      [:function
+       [:=> [:cat Composite :any] MemberResult]
+       [:=> [:cat Composite :any [:maybe [:map {:closed false}]]] MemberResult]])
+(m/=> remove-member!
+      [:=> [:cat Composite :any] [:map {:closed true} [:success? [:= true]] [:removed? :boolean]]])
 (m/=> composite? [:=> [:cat :any] :boolean])
 (m/=> member-ids [:=> [:cat :any] [:vector :any]])
 (m/=> members [:=> [:cat :any] [:vector Member]])
