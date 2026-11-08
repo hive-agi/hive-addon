@@ -3,7 +3,8 @@
    root `tools/list`.
 
    A root tool needs a non-blank :name and :description and an :inputSchema of
-   type \"object\" with at least one property. Anything less is a VIOLATION.
+   type \"object\" carrying a :properties map (empty for a zero-argument tool).
+   Anything less is a VIOLATION.
    A property without a :description is a WARNING, promoted to a violation
    when the caller opts in with `{:require-descriptions? true}`
    (`--require-descriptions` on the CLI) — see `findings`.
@@ -40,11 +41,9 @@
   [:map {:closed false}])
 
 (def Properties
-  "The :properties of a root tool's :inputSchema. Never empty."
-  [:and
-   [:map-of {:error/message "must be a map of property name to schema map"}
-    PropertyName Property]
-   [:fn {:error/message "must declare at least one property"} seq]])
+  "The :properties of a root tool's :inputSchema. Empty for a zero-argument tool."
+  [:map-of {:error/message "must be a map of property name to schema map"}
+   PropertyName Property])
 
 (def RootInputSchema
   "The :inputSchema a root tool must carry."
