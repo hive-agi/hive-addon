@@ -30,7 +30,8 @@
   (:require [hive-addon.hot.cascade :as cascade]
             [hive-addon.hot.port :as hport]
             [hive-dsl.result :as r]
-            [hive-addon.hot.report :as verdict]))
+            [hive-addon.hot.report :as verdict]
+            [hive-addon.registry.commands :as cmds]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -430,13 +431,17 @@
           loaded (mapv str (:loaded ns-res))]
       (if (seq stale)
         (stale-refusal (-strategy-id this) ctx [id] ns-res stale)
-        (cond-> (-> (base-report (-strategy-id this) ctx)
-                    (assoc :hot/affected [id]
-                           :hot/ns-reloaded loaded
-                           :ok? (:ok? ns-res))
-                    (with-ns-outcome ns-res))
-          (:ok? ns-res)          (with-empty-reload ctx loaded)
-          (seq (:errors ns-res)) (assoc :errors (vec (:errors ns-res))))))))
+        (let [resolve-fn (:hot/resolve-contribution ctx)
+              refreshed  (when (and (:ok? ns-res) resolve-fn)
+                           (cmds/refresh-namespaces! loaded resolve-fn))]
+          (cond-> (-> (base-report (-strategy-id this) ctx)
+                      (assoc :hot/affected [id]
+                             :hot/ns-reloaded loaded
+                             :ok? (:ok? ns-res))
+                      (with-ns-outcome ns-res))
+            (:ok? ns-res)          (with-empty-reload ctx loaded)
+            (seq refreshed)        (assoc :hot/contributions-refreshed refreshed)
+            (seq (:errors ns-res)) (assoc :errors (vec (:errors ns-res)))))))))
 
 ;; =============================================================================
 ;; Built-in strategy: :inert

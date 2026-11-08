@@ -1,0 +1,22 @@
+{:describe
+ {:op :addon/describe,
+  :result
+  #:addon{:id "mini.kernel",
+          :type :external,
+          :capabilities #{:tools},
+          :tools
+          [{:name "double",
+            :description "doubles x",
+            :inputSchema
+            {:type "object", :properties {"x" {:type "number"}}}}],
+          :excluded-tools #{},
+          :schema-extensions [],
+          :hooks #:mini{:table {:kind :data, :value {:a 1}}}}},
+ :health {:op :addon/health, :result {:status :down}},
+ :hook-data {:op :addon/hook, :result {:a 1}},
+ :no-such-hook {:op :addon/hook, :error "no such hook: :mini/none"},
+ :no-such-tool {:op :addon/tool, :error "no such tool: \"nope\""},
+ :not-a-map {:error "request line is not a map"},
+ :tool {:op :addon/tool, :result {:result 42}},
+ :unknown-op {:error "unknown op: :addon/teleport"},
+ :unreadable {:error "unreadable request line"}}

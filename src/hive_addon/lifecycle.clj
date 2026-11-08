@@ -30,7 +30,9 @@
             [hive-addon.mount.boundary :as boundary]
             [hive-addon.mount.port :as mport]
             [hive-addon.wire :as wire]
-            [hive-dsl.result :as r])
+            [hive-dsl.result :as r]
+            [malli.core :as m]
+            [hive-addon.lifecycle.schema :as ls])
   (:import [java.util.concurrent Executors ScheduledExecutorService ThreadFactory TimeUnit]
            [java.util.concurrent.locks ReentrantLock]))
 
@@ -83,6 +85,16 @@
     (reset! seat mgr)
     mgr))
 
+;; Contract shapes. A Manager is built by `manager`, never drawn, so it is a
+;; predicate; ids are :any because a governed id is whatever the specs carry.
+(def ^:private Mgr [:fn {:error/message "should be a lifecycle Manager"} #(instance? Manager %)])
+(def ^:private AnyMap [:map-of :any :any])
+(def ^:private Opts [:maybe AnyMap])
+(def ^:private Host
+  [:fn {:error/message "should satisfy ILifecycleHost"} #(satisfies? lport/ILifecycleHost %)])
+
+(m/=> manager [:=> [:cat [:map {:closed false} [:host Host] [:specs {:optional true} [:maybe [:sequential AnyMap]]]]] Mgr])
+
 (defn current
   "The Manager now governing MGR's state: the one a later reseat-host! seated,
    else MGR itself. Resolved at call time, so a caller holding an older Manager
@@ -90,20 +102,30 @@
   [mgr]
   (or (some-> (:seat mgr) deref) mgr))
 
+(m/=> current [:=> [:cat Mgr] Mgr])
+
 (defn- now [mgr] ((get-in mgr [:opts :now-ms])))
 
 (defn- spec-of [mgr id] (some #(when (= id (:addon/id %)) %) @(:specs mgr)))
 
 (defn state [mgr id] (get @(:states mgr) id))
 
+(m/=> state [:=> [:cat Mgr :any] [:maybe ls/UseState]])
+
 (defn phase [mgr id] (:phase (state mgr id)))
 
+(m/=> phase [:=> [:cat Mgr :any] [:maybe ls/Phase]])
+
 (defn active? [mgr id] (= :active (phase mgr id)))
+
+(m/=> active? [:=> [:cat Mgr :any] :boolean])
 
 (defn dormant?
   "True for an addon this manager governs that is not mounted."
   [mgr id]
   (contains? #{:dormant :failed} (phase mgr id)))
+
+(m/=> dormant? [:=> [:cat Mgr :any] :boolean])
 
 (defn- lifecycles [mgr]
   (policy/resolve-all @(:specs mgr) (select-keys (:opts mgr) [:defaults :overrides])))
@@ -141,6 +163,11 @@
           res     (surface/resolve-surface spec learned)]
       (swap! (:surfaces mgr) assoc id res)
       res)))
+
+(m/=> surface-of
+      [:=> [:cat Mgr :any]
+       [:or [:tuple ls/Surface [:enum :declared :learned]]
+            [:tuple :nil [:= :none]]]])
 
 (defn- learn-surface!
   "Record what mounted ID shows, unless its surface is declared. An addon that
@@ -257,6 +284,10 @@
         (activation-report id false [] :errors [(:message res)])
         (:ok res)))))
 
+;; An ungoverned id is answered too (:ok? false, :errors), so the id is :any
+;; rather than ls/ActivationReport's AddonId.
+(m/=> activate! [:=> [:cat Mgr :any] [:map {:closed false} [:addon/id :any] [:ok? :boolean] [:activated [:vector :any]]]])
+
 ;; =============================================================================
 ;; Use tracking
 ;; =============================================================================
@@ -289,6 +320,8 @@
     (update-state! mgr id assoc :last-used-ms (now mgr)))
   nil)
 
+(m/=> touch! [:=> [:cat Mgr :any] :nil])
+
 (defn call-with-use
   "Call F with ID counted in flight. An ungoverned ID runs F untracked. A dormant
    ID is activated first; when that fails F is not called and the
@@ -304,6 +337,9 @@
         (throw (ex-info (str "addon " id " could not be activated")
                         {:lifecycle/activation rep}))))))
 
+;; Answers whatever F answers.
+(m/=> call-with-use [:=> [:cat Mgr :any ifn?] :any])
+
 (defmacro with-use
   "Run BODY with addon ID counted in flight (see call-with-use)."
   [mgr id & body]
@@ -313,6 +349,8 @@
   "F wrapped so every call counts as a use of ID."
   [mgr id f]
   (fn [& args] (call-with-use mgr id #(apply f args))))
+
+(m/=> tracked [:=> [:cat Mgr :any ifn?] ifn?])
 
 ;; =============================================================================
 ;; Eviction
@@ -404,12 +442,32 @@
        (refused-eviction id :lock-timeout :errors [(:message res)])
        (:ok res)))))
 
+;; :reason also carries :unknown and :lock-timeout, so the report is checked
+;; with the id and reason open.
+(def ^:private Eviction
+  [:map {:closed false}
+   [:addon/id :any]
+   [:ok? :boolean]
+   [:evicted? :boolean]
+   [:refused? {:optional true} :boolean]
+   [:reason {:optional true} :keyword]
+   [:parts-closed {:optional true} [:vector :keyword]]
+   [:teardown/data-preserved? {:optional true} :boolean]
+   [:errors {:optional true} [:vector :string]]])
+
+(m/=> evict!
+      [:function
+       [:=> [:cat Mgr :any] Eviction]
+       [:=> [:cat Mgr :any Opts] Eviction]])
+
 ;; =============================================================================
 ;; Sweep
 ;; =============================================================================
 
 (defn sweep-plan [mgr]
   (policy/sweep-plan (now mgr) @(:specs mgr) @(:states mgr)))
+
+(m/=> sweep-plan [:=> [:cat Mgr] ls/SweepPlan])
 
 (defn sweep!
   "Evict every addon the sweep plan allows, then close idle parts.
@@ -421,6 +479,14 @@
      :evicted (into [] (comp (filter :evicted?) (map :addon/id)) reports)
      :refused (into {} (comp (remove :evicted?) (map (juxt :addon/id :reason))) reports)
      :parts   (part/sweep! (now mgr))}))
+
+(m/=> sweep!
+      [:=> [:cat Mgr]
+       [:map {:closed true}
+        [:plan ls/SweepPlan]
+        [:evicted [:vector :any]]
+        [:refused [:map-of :any :keyword]]
+        [:parts [:map-of :any [:vector :keyword]]]]])
 
 (defn start-sweeper!
   "Sweep every :sweep-interval-ms on a daemon thread. Idempotent. Each tick
@@ -440,11 +506,23 @@
          (reset! (:sweeper mgr) {:executor exec :interval-ms ms})
          @(:sweeper mgr)))))
 
+(def ^:private Sweeper
+  [:map {:closed true}
+   [:executor [:fn #(instance? ScheduledExecutorService %)]]
+   [:interval-ms :int]])
+
+(m/=> start-sweeper!
+      [:function
+       [:=> [:cat Mgr] Sweeper]
+       [:=> [:cat Mgr Opts] Sweeper]])
+
 (defn stop-sweeper! [mgr]
   (when-let [{:keys [executor]} @(:sweeper mgr)]
     (.shutdownNow ^ScheduledExecutorService executor)
     (reset! (:sweeper mgr) nil))
   nil)
+
+(m/=> stop-sweeper! [:=> [:cat Mgr] :nil])
 
 ;; =============================================================================
 ;; Boot and adoption
@@ -489,6 +567,11 @@
                 :ok?        (or (nil? report) (boolean (:ok? report)))}
          report (assoc :mount report))))))
 
+(m/=> boot!
+      [:function
+       [:=> [:cat Mgr] ls/BootReport]
+       [:=> [:cat Mgr Opts] ls/BootReport]])
+
 (defn adopt!
   "Govern SPECS that are ALREADY mounted (hot inject, a host's own boot) as active
    addons under the resolved policy — the manifest's :addon/lifecycle under the
@@ -516,6 +599,8 @@
                     id))
           specs)))
 
+(m/=> adopt! [:=> [:cat Mgr [:sequential AnyMap]] [:vector :any]])
+
 (defn forget!
   "Stop governing IDS entirely — the inverse of adopt!, for an addon being
    plugged OUT. Withdraws any stubs advertised for them and drops their spec,
@@ -534,6 +619,8 @@
                   governed)))]
     (if (r/err? res) [] (:ok res))))
 
+(m/=> forget! [:=> [:cat Mgr [:or [:sequential :any] [:set :any]]] [:vector :any]])
+
 (defn set-policy!
   "Change ID's lifecycle at runtime (e.g. pin it). Returns the new Lifecycle.
 
@@ -549,6 +636,15 @@
      (assoc (:lifecycle (state mgr id)) :refused :no-surface)
      (-> (swap! (:states mgr) update-in [id :lifecycle] merge decl)
          (get-in [id :lifecycle])))))
+
+;; A refused change answers the unchanged lifecycle with :refused :no-surface.
+(def ^:private SetPolicy
+  [:map {:closed false} [:policy ls/Policy] [:idle-ms ls/IdleMs] [:refused {:optional true} [:= :no-surface]]])
+
+(m/=> set-policy!
+      [:function
+       [:=> [:cat Mgr :any ls/LifecycleDecl] SetPolicy]
+       [:=> [:cat Mgr :any ls/LifecycleDecl Opts] SetPolicy]])
 
 ;; =============================================================================
 ;; Status and installation
@@ -570,6 +666,14 @@
                      @(:states mgr))
       :parts   (part/statuses)})))
 
+(m/=> status
+      [:=> [:cat Mgr]
+       [:map {:closed true}
+        [:now-ms :int]
+        [:sweeper [:maybe AnyMap]]
+        [:addons [:map-of :any AnyMap]]
+        [:parts [:map-of :any :any]]]])
+
 (defonce ^:private installed (atom nil))
 
 (defn install!
@@ -583,13 +687,19 @@
   (oracle/install-dormancy! #(dormant? mgr %))
   mgr)
 
+(m/=> install! [:=> [:cat Mgr] Mgr])
+
 (defn uninstall! []
   (when-let [mgr @installed] (stop-sweeper! mgr))
   (reset! installed nil)
   (oracle/reset-dormancy!)
   nil)
 
+(m/=> uninstall! [:=> [:cat] :nil])
+
 (defn installed-manager [] @installed)
+
+(m/=> installed-manager [:=> [:cat] [:maybe Mgr]])
 
 ;; =============================================================================
 ;; Re-seating on a new host
@@ -659,6 +769,8 @@
       {:ok? false :reseated? false :errors [(:message res)]}
       (:ok res))))
 
+(m/=> reseat-host! [:=> [:cat Mgr [:or Host ifn?]] ls/ReseatReport])
+
 ;; =============================================================================
 ;; A host over IMountHost, for tests and hosts without a tool surface
 ;; =============================================================================
@@ -692,3 +804,8 @@
    ({id {:surface s :activate! f}}) readable as (:stubs host)."
   ([mh] (mount-host mh {}))
   ([mh mount-opts] (->MountHost mh mount-opts (atom {}))))
+
+(m/=> mount-host
+      [:function
+       [:=> [:cat :any] Host]
+       [:=> [:cat :any Opts] Host]])

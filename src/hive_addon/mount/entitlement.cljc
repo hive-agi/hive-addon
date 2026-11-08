@@ -7,7 +7,8 @@
 
    A spec whose :addon/trust-class is :proprietary is refused unless a gate is
    installed, so the default posture of an unconfigured host is closed."
-  (:require [hive-addon.plug.schema :as ps]))
+  (:require [hive-addon.plug.schema :as ps]
+            [malli.core :as m]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -84,3 +85,26 @@
   "Re-exported so a MountSpec can state its trust class without reaching into
    the plug layer."
   ps/TrustClass)
+
+;; Contracts. A spec is any map: an absent :addon/trust-class is the default
+;; this namespace exists to apply, so the input is not narrowed to MountSpec.
+(def ^:private Gate
+  "An ILicenseGate or any (fn [spec] -> nil | reason).
+
+   Stated as `:some` rather than a satisfies? check on purpose: the installed
+   gate lives in a defonce, so after a reload of this namespace it is a reify of
+   the PREVIOUS protocol object and no longer satisfies the current one, while
+   `permit` still treats it correctly (it falls through to the refusal). A
+   contract that rejected it would fail a working host, not a broken one."
+  :some)
+
+;; A gate answers whatever it answers; a gate that throws is :deny/gate-error.
+(m/=> permit [:=> [:cat :any [:map-of :any :any]] :any])
+
+(m/=> reset-gate! [:=> [:cat] Gate])
+
+(m/=> installed-gate [:=> [:cat] Gate])
+
+(m/=> install-gate! [:=> [:cat Gate] Gate])
+
+(m/=> gated? [:=> [:cat [:map-of :any :any]] :boolean])

@@ -1,0 +1,3 @@
+{:closed :hive-addon.opaque.addon-test/fallback,
+ :live {:status :down},
+ :throws :hive-addon.opaque.addon-test/fallback}

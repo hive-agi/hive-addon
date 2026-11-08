@@ -1,0 +1,6 @@
+{:deeper-default
+ {:handler :h2, :path-used [:status], :remaining [:nope :x]},
+ :leaf {:handler :h1, :path-used [:ping], :remaining []},
+ :nested {:handler :h1, :path-used [:status :list], :remaining []},
+ :not-found {:error :not-found, :path-used [], :remaining [:nope]},
+ :subtree-default {:handler :h2, :path-used [:status], :remaining []}}

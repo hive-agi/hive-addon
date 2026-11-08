@@ -142,25 +142,36 @@
   [{:keys [schema]}]
   (if schema :capability/declared :capability/undeclared))
 
+(m/=> status [:=> [:cat [:map {:closed false} [:schema {:optional true} :any]]]
+               [:enum :capability/declared :capability/undeclared]])
+
 (defn index
   "manifest -> {command-name CommandSpec}."
   [manifest]
   (into {} (map (juxt :command identity)) (:commands manifest)))
+
+(m/=> index [:=> [:cat CapabilityManifest] [:map-of CommandName CommandSpec]])
 
 (defn declared
   "manifest -> set of command names carrying a CommandSpec."
   [manifest]
   (into #{} (map :command) (:commands manifest)))
 
+(m/=> declared [:=> [:cat CapabilityManifest] [:set CommandName]])
+
 (defn schematized
   "manifest -> set of command names whose CommandSpec carries a :schema."
   [manifest]
   (into #{} (comp (filter :schema) (map :command)) (:commands manifest)))
 
+(m/=> schematized [:=> [:cat CapabilityManifest] [:set CommandName]])
+
 (defn undeclared
   "manifest -> set of dispatchable command names with no CommandSpec."
   [manifest]
   (set/difference (:all-commands manifest) (declared manifest)))
+
+(m/=> undeclared [:=> [:cat CapabilityManifest] [:set CommandName]])
 
 (defn command-enum
   "manifest -> the CLOSED command enum schema [:enum & sorted :all-commands].

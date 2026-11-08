@@ -1,0 +1,12 @@
+{:many
+ {:code :addon/not-mounted,
+  :retryable false,
+  :actions [{:tool "hot", :arguments {:command "list"}}],
+  :message
+  "I was expecting an addon in the current mount specifications for `:addon/id` but got vector: [\"a\" \"b\"]\n\nHINT: Run hive hot list. If the addon is absent, mount its project with hive hot inject using an absolute path, then verify its host dependency is included at startup. Reload cannot mount an absent addon."},
+ :one
+ {:code :addon/not-mounted,
+  :retryable false,
+  :actions [{:tool "hot", :arguments {:command "list"}}],
+  :message
+  "I was expecting an addon in the current mount specifications for `:addon/id` but got vector: [\"hive.rss\"]\n\nHINT: Run hive hot list. If the addon is absent, mount its project with hive hot inject using an absolute path, then verify its host dependency is included at startup. Reload cannot mount an absent addon."}}

@@ -16,7 +16,8 @@
    becomes {:hot/source-kind :absent}."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
-            [hive-dsl.result :as r])
+            [hive-dsl.result :as r]
+            [malli.core :as m])
   (:import [java.net URL]
            [java.io File]))
 
@@ -41,11 +42,15 @@
       (str/replace "-" "_")
       (str/replace "." "/")))
 
+(m/=> ns->base-path [:=> [:cat :any] :string])
+
 (defn ns->resource-paths
   "Candidate classpath resource paths for a namespace, in load order."
   [ns-str]
   (let [base (ns->base-path ns-str)]
     (mapv #(str base %) source-extensions)))
+
+(m/=> ns->resource-paths [:=> [:cat :any] [:vector :string]])
 
 ;; =============================================================================
 ;; URL -> source kind
@@ -138,6 +143,23 @@
                   :hot/source-url  (str url)}
            dir (assoc :hot/source-dir dir)))))))
 
+(def ^:private ResolvedSource
+  "An AddonSource WITHOUT :addon/id, as resolve-source answers it. Closed: the
+   five keys are every key it can carry."
+  [:map {:closed true}
+   [:addon/init-ns :string]
+   [:hot/source-kind [:enum :directory :jar :absent]]
+   [:hot/reloadable? :boolean]
+   [:hot/source-dir {:optional true} :string]
+   [:hot/source-url {:optional true} :string]])
+
+(def ^:private Dirs [:maybe [:or [:sequential :any] [:set :any]]])
+
+(m/=> resolve-source
+      [:function
+       [:=> [:cat :any] ResolvedSource]
+       [:=> [:cat :any Dirs] ResolvedSource]])
+
 (defn spec-source
   "Resolve the AddonSource for a MountSpec, stamped with its :addon/id. Dirs the
    spec carries under :hot/source-dirs are probed before the classpath."
@@ -145,10 +167,17 @@
   (assoc (resolve-source (:addon/init-ns spec) (:hot/source-dirs spec))
          :addon/id (:addon/id spec)))
 
+(def ^:private SpecSource
+  (conj ResolvedSource [:addon/id :any]))
+
+(m/=> spec-source [:=> [:cat [:map-of :any :any]] SpecSource])
+
 (defn sources
   "Resolve every spec's AddonSource. Returns a vector in spec order."
   [specs]
   (mapv spec-source specs))
+
+(m/=> sources [:=> [:cat [:sequential [:map-of :any :any]]] [:vector SpecSource]])
 
 (defn watchable-dirs
   "The set of classpath-root directories among `specs` that clj-reload can watch.
@@ -162,3 +191,6 @@
               (filter :hot/reloadable?)
               (keep :hot/source-dir))
         specs))
+
+(m/=> watchable-dirs
+      [:=> [:cat [:or [:sequential [:map-of :any :any]] [:set [:map-of :any :any]]]] [:set :string]])

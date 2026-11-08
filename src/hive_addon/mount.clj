@@ -16,7 +16,8 @@
             [hive-addon.mount.schema :as schema]
             [hive-addon.mount.solve :as solve]
             [hive-addon.mount.entitlement :as ent]
-            [hive-addon.mount.maturity :as mat]))
+            [hive-addon.mount.maturity :as mat]
+            [malli.core :as m]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -106,6 +107,13 @@
        plan
        (cond-> (mount! plan host opts)
          (seq errors) (assoc :discovery-errors errors))))))
+
+;; A MountReport, or solve's fail-closed err map returned as-is.
+(m/=> mount-classpath!
+      [:function
+       [:=> [:cat :any] [:or schema/MountReport [:map [:error :qualified-keyword]]]]
+       [:=> [:cat :any [:maybe [:map-of :any :any]]]
+        [:or schema/MountReport [:map [:error :qualified-keyword]]]]])
 
 ;; =============================================================================
 ;; Re-exports — composition root (plug-select + mount over discovered specs)

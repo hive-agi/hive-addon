@@ -1,0 +1,3 @@
+{:deep ["a/b_c/d.clj" "a/b_c/d.cljc"],
+ :simple ["hive_carto/carto_init.clj" "hive_carto/carto_init.cljc"],
+ :single ["user.clj" "user.cljc"]}

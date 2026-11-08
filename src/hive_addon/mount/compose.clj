@@ -16,7 +16,8 @@
             [hive-dsl.result :as r]
             [clojure.edn :as edn]
             [clojure.java.io :as io]
-            [clojure.set :as set]))
+            [clojure.set :as set]
+            [malli.core :as m]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -57,6 +58,26 @@
       (reduce add-selected acc selected)
       (reduce add-dropped acc dropped))))
 
+;; Contract shapes. compose's results ride the hive-dsl railway: (r/ok map) or
+;; an err map carrying :error.
+(def ^:private AnyMap [:map-of :any :any])
+(def ^:private Specs [:sequential AnyMap])
+(def ^:private Layers [:sequential AnyMap])
+(def ^:private Opts [:maybe AnyMap])
+(def ^:private Railway
+  [:or [:map {:closed true} [:ok AnyMap]] [:map [:error :qualified-keyword]]])
+
+(def ^:private PlugIndex
+  [:map {:closed true}
+   [:by-id [:map-of :any AnyMap]]
+   [:selected-ids [:set :any]]
+   [:dropped-ids [:set :any]]
+   [:dropped-reasons [:map-of :any :any]]
+   [:config-by-id [:map-of :any :any]]
+   [:unjoinable [:vector :any]]])
+
+(m/=> plug-index [:=> [:cat AnyMap] PlugIndex])
+
 (defn select-specs
   "Filter discovered MountSpecs through a plug index.
    Default (strict-select false): plug only REMOVES — keep every spec whose
@@ -90,6 +111,13 @@
      :selected-absent  (set/difference (set selected-ids) discovered-ids)
      :config-by-id     (or config-by-id {})}))
 
+(m/=> select-specs [:=> [:cat Specs [:map {:closed false} [:dropped-ids {:optional true} [:maybe [:set :any]]] [:selected-ids {:optional true} [:maybe [:set :any]]]] Opts] [:map {:closed true}
+        [:specs [:vector AnyMap]]
+        [:dropped [:map-of :any :any]]
+        [:unjoinable [:vector :any]]
+        [:selected-absent [:set :any]]
+        [:config-by-id [:map-of :any :any]]]])
+
 (defn compose-config-resolver
   "Wrap base-resolver so per-addon build.edn :config overrides merge ON TOP of
    the base (e.g. hive-di) config. base-resolver defaults to
@@ -99,6 +127,11 @@
    (fn [spec]
      (merge (base-resolver spec)
             (get config-by-id (:addon/id spec) {})))))
+
+(m/=> compose-config-resolver
+      [:function
+       [:=> [:cat [:maybe [:map-of :any :any]]] ifn?]
+       [:=> [:cat ifn? [:maybe [:map-of :any :any]]] ifn?]])
 
 ;; =============================================================================
 ;; Effectful shell
@@ -159,6 +192,11 @@
                   :plan            plan
                   :extensions      (ext/report specs)})))))))
 
+(m/=> compose-plan
+      [:function
+       [:=> [:cat Specs Layers] Railway]
+       [:=> [:cat Specs Layers Opts] Railway]])
+
 (defn compose!
   "Full composition: compose-plan then mount! the plan into host, threading
    per-addon build.edn :config over the base resolve-config. opts:
@@ -181,6 +219,11 @@
                                           :resolve-config
                                           (compose-config-resolver resolve-config config-by-id)))]
        (r/ok (assoc composed :report report))))))
+
+(m/=> compose!
+      [:function
+       [:=> [:cat Specs Layers :any] Railway]
+       [:=> [:cat Specs Layers :any Opts] Railway]])
 
 (defn- parse-validate-layer
   "Parse content as EDN + validate against IaddonConfig →
@@ -230,6 +273,16 @@
            {:layers [] :errors []}
            (or paths []))))
 
+(def ^:private LayerRead
+  [:map {:closed true}
+   [:layers [:vector [:map {:closed true} [:id :any] [:config AnyMap]]]]
+   [:errors [:vector AnyMap]]])
+
+(m/=> read-layers
+      [:function
+       [:=> [:cat [:maybe [:sequential :any]]] LayerRead]
+       [:=> [:cat [:maybe [:sequential :any]] :any] LayerRead]])
+
 (defn compose-classpath!
   "One-call host entry: discover MountSpecs on the classpath + read plug layers
    from :layer-paths + compose! into host. Returns (r/ok {<compose! keys>
@@ -247,3 +300,8 @@
                (seq errors)       (assoc :discovery-errors errors)
                (seq layer-errors) (assoc :layer-errors layer-errors)))
        result))))
+
+(m/=> compose-classpath!
+      [:function
+       [:=> [:cat :any] Railway]
+       [:=> [:cat :any Opts] Railway]])

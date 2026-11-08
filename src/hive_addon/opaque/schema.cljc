@@ -165,20 +165,28 @@
   [?s]
   (m/schema ?s {:registry registry}))
 
+(m/=> schema [:=> [:cat s/SchemaForm] s/CompiledSchema])
+
 (defn validate
   "Registry-aware validate — true/false."
   [?s x]
   (m/validate ?s x {:registry registry}))
+
+(m/=> validate [:=> [:cat s/SchemaForm :any] :boolean])
 
 (defn explain
   "Registry-aware explain — nil on success, error map on failure."
   [?s x]
   (m/explain ?s x {:registry registry}))
 
+(m/=> explain [:=> [:cat s/SchemaForm :any] [:maybe s/Explanation]])
+
 (defn humanize-errors
   "Human-readable error data for x against ?s, or nil if x conforms."
   [?s x]
   (some-> (explain ?s x) me/humanize))
+
+(m/=> humanize-errors [:=> [:cat s/SchemaForm :any] [:maybe s/Humanized]])
 
 (defn validate*
   "Validate x against ?s, bridging to hive-dsl Result.
@@ -190,3 +198,7 @@
    (if (validate ?s x)
      (r/ok x)
      (r/err category {:explanation (humanize-errors ?s x)}))))
+
+(m/=> validate* [:function
+                 [:=> [:cat s/SchemaForm :any] s/ValidationResult]
+                 [:=> [:cat s/SchemaForm :any :qualified-keyword] s/ValidationResult]])

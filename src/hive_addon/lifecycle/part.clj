@@ -14,7 +14,8 @@
      (part/with-part [idx index] (query idx q))
 
    Closing never deletes data: :close releases what :open acquired."
-  (:require [hive-dsl.result :as r]))
+  (:require [hive-dsl.result :as r]
+            [malli.core :as m]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -23,6 +24,24 @@
 (defn- system-now [] (System/currentTimeMillis))
 
 (defrecord Part [id idle-ms open close clock state])
+
+(def PartOpts
+  "What `part` accepts: its own precondition."
+  [:map {:closed false}
+   [:id :keyword]
+   [:idle-ms pos-int?]
+   [:open ifn?]
+   [:close {:optional true} [:maybe ifn?]]
+   [:clock {:optional true} [:maybe ifn?]]])
+
+(def APart
+  [:fn {:error/message "should be a Part"} #(instance? Part %)])
+
+(def PartStatus
+  [:map {:closed true}
+   [:id :keyword] [:idle-ms pos-int?]
+   [:open? :boolean] [:last-used-ms [:maybe :int]] [:in-flight [:int {:min 0}]]
+   [:opens [:int {:min 0}]] [:closes [:int {:min 0}]] [:last-error [:maybe :string]]])
 
 (defn part
   "A closed part. OPTS:
@@ -37,9 +56,13 @@
           (atom {:open? false :resource nil :last-used-ms nil :in-flight 0
                  :opens 0 :closes 0 :last-error nil})))
 
+(m/=> part [:=> [:cat PartOpts] APart])
+
 (defn open?
   [p]
   (:open? @(:state p)))
+
+(m/=> open? [:=> [:cat APart] :boolean])
 
 (defn acquire!
   "The part's resource, opening it first when closed. Touches the part.
@@ -54,6 +77,9 @@
       (swap! (:state p) assoc :last-used-ms now)
       (:resource @(:state p)))))
 
+;; The resource is whatever :open built; the contract is on the part.
+(m/=> acquire! [:=> [:cat APart] :any])
+
 (defn begin-use!
   "Acquire P and count one use in flight. Pair with end-use!."
   [p]
@@ -62,11 +88,15 @@
       (swap! (:state p) update :in-flight inc)
       res)))
 
+(m/=> begin-use! [:=> [:cat APart] :any])
+
 (defn end-use!
   [p]
   (swap! (:state p) (fn [st] (-> st
                                  (update :in-flight #(max 0 (dec %)))
                                  (assoc :last-used-ms ((:clock p)))))))
+
+(m/=> end-use! [:=> [:cat APart] [:map {:closed false} [:in-flight [:int {:min 0}]]]])
 
 (defmacro with-part
   "Bind SYM to P's resource for BODY, holding P open for its duration."
@@ -92,6 +122,8 @@
           (swap! (:state p) update :closes inc)
           :closed)))))
 
+(m/=> close! [:=> [:cat APart] [:enum :closed :already-closed :in-flight]])
+
 (defn idle?
   "True when P is open, unused, and untouched for its :idle-ms as of NOW."
   [p now]
@@ -101,12 +133,16 @@
          (some? last-used-ms)
          (>= (- now last-used-ms) (:idle-ms p)))))
 
+(m/=> idle? [:=> [:cat APart :int] :boolean])
+
 (defn status
   "P as data."
   [p]
   (-> @(:state p)
       (dissoc :resource)
       (assoc :id (:id p) :idle-ms (:idle-ms p))))
+
+(m/=> status [:=> [:cat APart] PartStatus])
 
 ;; =============================================================================
 ;; Registry, by owner
@@ -124,12 +160,18 @@
         (close! prev))))
   p)
 
+(m/=> register-part! [:=> [:cat :any APart] APart])
+
 (defn parts-of
   "{part-id Part} registered under OWNER."
   [owner]
   (get @registry owner {}))
 
+(m/=> parts-of [:=> [:cat :any] [:map-of :keyword APart]])
+
 (defn owners [] (vec (keys @registry)))
+
+(m/=> owners [:=> [:cat] [:vector :any]])
 
 (defn close-owner!
   "Close every part of OWNER and forget them. Returns the ids closed now."
@@ -137,6 +179,8 @@
   (let [[old _] (swap-vals! registry dissoc owner)]
     (into [] (keep (fn [[id p]] (when (= :closed (close! p)) id)))
           (get old owner))))
+
+(m/=> close-owner! [:=> [:cat :any] [:vector :keyword]])
 
 (defn sweep!
   "Close every idle part as of NOW. Returns {owner [part-id ...]} for the parts
@@ -151,13 +195,19 @@
                   (when (seq closed) [owner closed]))))
         @registry))
 
+(m/=> sweep! [:=> [:cat :int] [:map-of :any [:vector :keyword]]])
+
 (defn statuses
   "{owner [part-status ...]}."
   []
   (into {} (map (fn [[owner parts]] [owner (mapv status (vals parts))])) @registry))
+
+(m/=> statuses [:=> [:cat] [:map-of :any [:vector PartStatus]]])
 
 (defn reset-registry!
   "Close and forget every part. For tests."
   []
   (doseq [owner (owners)] (close-owner! owner))
   nil)
+
+(m/=> reset-registry! [:=> [:cat] :nil])

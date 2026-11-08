@@ -16,7 +16,8 @@
 
    JVM only (.clj): `requiring-resolve` has no ClojureScript counterpart, and
    the host boundary this covers is a JVM boundary."
-  (:require [hive-dsl.result :as r]))
+  (:require [hive-dsl.result :as r]
+            [malli.core :as m]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -34,10 +35,16 @@
   [sym]
   (try (requiring-resolve sym) (catch Throwable _ nil)))
 
+;; Inputs are :any on purpose: resolve-var's contract is that it NEVER throws,
+;; whatever it is handed.
+(m/=> resolve-var [:=> [:cat :any] [:maybe [:fn {:error/message "should be a Var"} var?]]])
+
 (defn available?
   "True when `sym` resolves to a var right now."
   [sym]
   (some? (resolve-var sym)))
+
+(m/=> available? [:=> [:cat :any] :boolean])
 
 ;; =============================================================================
 ;; The seam
@@ -63,6 +70,8 @@
          (if absent-fn
            (apply absent-fn args)
            (r/err :host/absent {:host/sym (str sym)})))))))
+
+(m/=> soft [:function [:=> [:cat :symbol] ifn?] [:=> [:cat :symbol [:maybe ifn?]] ifn?]])
 
 (defmacro defsoft
   "Def `name` as the soft fn for host symbol `sym`.
@@ -91,6 +100,8 @@
              {}
              (ns-publics ns-sym)))
 
+(m/=> declared-symbols [:=> [:cat :symbol] [:map-of :symbol :any]])
+
 (defn unresolvable
   "Of the host symbols `defsoft` declared across `ns-syms`, those that do NOT
    resolve right now, as {var-symbol host-symbol}.
@@ -104,6 +115,8 @@
               :when (nil? (resolve-var sym))]
           [(symbol (str ns-sym) (str var-name)) sym])))
 
+(m/=> unresolvable [:=> [:cat [:sequential :symbol]] [:map-of :qualified-symbol :any]])
+
 (defn api
   "Build a var-map of soft fns from `{k sym}` or `{k [sym absent-fn]}`.
 
@@ -116,3 +129,5 @@
                               (soft v))))
              {}
              spec))
+
+(m/=> api [:=> [:cat [:map-of :any [:or :symbol [:tuple :symbol [:maybe ifn?]]]]] [:map-of :any ifn?]])

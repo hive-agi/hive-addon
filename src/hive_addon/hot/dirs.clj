@@ -6,7 +6,8 @@
    remove-dirs!) answers an err Result naming why — never a throw. The pure
    reading of what hive-hot answered lives in hive-addon.hot.report/dirs-outcome."
   (:require [hive-addon.hot.port :as hport]
-            [hive-dsl.result :as r]))
+            [hive-dsl.result :as r]
+            [malli.core :as m]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -39,3 +40,5 @@
    held across a reload of hive-addon.hot.port would stop satisfying it."
   []
   (->HiveHotDirs))
+
+(m/=> hot-dirs [:=> [:cat] [:fn {:error/message "should satisfy IHotDirs"} #(satisfies? hport/IHotDirs %)]])
