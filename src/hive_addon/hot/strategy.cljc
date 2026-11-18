@@ -22,12 +22,18 @@
    gate in hive-addon.mount.entitlement. Strategies are resolved from the var at
    CALL time, never captured at wiring time.
 
+   All-or-nothing per addon: a reload whose namespace pass fails, or whose
+   constructor namespace will not load, remounts NOTHING of the slice, keeps the
+   previous instances serving, and names the addons it left half-loaded under
+   :hot/reload-failures (see hive-addon.hot.failures).
+
    Portable: this namespace names no host API. The two effectful collaborators —
    the namespace reloader and the mount driver — arrive through the reload
    context (`:hot/reload-ns!`, `:hot/mount-driver`), so hive-hot stays a soft
    dependency and the classpath-bound mount boundary stays behind
    hive-addon.hot.port/IMountDriver."
   (:require [hive-addon.hot.cascade :as cascade]
+            [hive-addon.hot.failures :as failures]
             [hive-addon.hot.port :as hport]
             [hive-dsl.result :as r]
             [hive-addon.hot.report :as verdict]
@@ -102,7 +108,10 @@
    Returns {:ok? bool :loaded [...] :errors [...]} plus, when the reloader
    answers them, :skipped (changed outside the reload's roots, declined),
    :dragged (changed outside, loaded as dependents), :multi-file (a loaded
-   namespace found in more than one file) and :unchanged? (nothing to load)."
+   namespace found in more than one file) and :unchanged? (nothing to load).
+   A failed pass also carries :failed (the namespace it stopped at, a string),
+   :error and :unloaded (what the pass unloaded): together they say which
+   constructor namespaces the failure left half-loaded."
   [ctx ns-strs]
   (cond
     (:hot/ns-reloaded? ctx)
@@ -114,12 +123,16 @@
     :else
     (let [res (r/try-effect ((:hot/reload-ns! ctx) ns-strs))]
       (if (r/err? res)
-        {:ok? false :loaded [] :errors [(str "namespace reload failed: " (:message res))]}
-        (let [{:keys [loaded failed skipped dragged multi-file] :as out} (:ok res)]
+        {:ok? false :loaded [] :error (str (:message res))
+         :errors [(str "namespace reload failed: " (:message res))]}
+        (let [{:keys [loaded failed skipped dragged multi-file unloaded] :as out} (:ok res)]
           (cond-> {:ok? (nil? failed) :loaded (vec loaded)}
             (:diagnostic out) (assoc :diagnostic (:diagnostic out))
             failed (assoc :errors [(str "namespace reload failed at: " failed
-                                        (when-let [e (:error out)] (str " — " e)))])
+                                        (when-let [e (:error out)] (str " — " e)))]
+                          :failed (str failed))
+            (and failed (:error out)) (assoc :error (str (:error out)))
+            (and failed (seq unloaded)) (assoc :unloaded (mapv str unloaded))
             (seq skipped)    (assoc :skipped (mapv str skipped))
             (seq dragged)    (assoc :dragged (mapv str dragged))
             (seq multi-file) (assoc :multi-file
@@ -299,6 +312,71 @@
     (or (r/rescue {} (hport/-snapshot driver host ids)) {})
     {}))
 
+;; =============================================================================
+;; Load failures — what a failed pass left half-loaded
+;; =============================================================================
+
+(defn- ns-load-failures
+  "{id mark} for the addons a FAILED namespace pass left half-loaded: the
+   `seeds` the pass was run for (rerunning their reload reruns the same failing
+   pass), plus every addon whose constructor namespace the pass failed at, or
+   unloaded and never loaded again. Those namespaces are gone or partial in the
+   image, next to protocols the pass may already have re-minted; none of their
+   addons may be remounted on it. A namespace the pass loaded completely is
+   whole and does not taint its addons."
+  [specs seeds ns-res]
+  (let [index   (cascade/ns->addon-ids specs)
+        loaded  (into #{} (map str) (:loaded ns-res))
+        broken  (sort (into #{} (comp (map str) (remove loaded))
+                            (concat (:unloaded ns-res)
+                                    (some-> (:failed ns-res) vector))))
+        tainted (into (vec (sort seeds))
+                      (comp (mapcat #(sort (get index %))) (remove (set seeds)) (distinct))
+                      broken)
+        mark    (cond-> {:reload/phase :ns-load
+                         :reload/error (or (:error ns-res)
+                                           (first (:errors ns-res))
+                                           "namespace reload failed")}
+                  (:failed ns-res) (assoc :reload/failed-ns (str (:failed ns-res))))]
+    (into (sorted-map) (map (fn [id] [id mark])) tainted)))
+
+(defn- ctor-load-failures
+  "{id mark} for the MountResult rows of `results` whose constructor namespace
+   failed to LOAD (:constructor/status :failed, which the mount boundary merges
+   into the row), tagged with `phase`. A constructor that loads and then throws
+   is not a load failure: the image is whole, only the new instance is bad, and
+   the previous one is restored."
+  [results phase]
+  (into (sorted-map)
+        (keep (fn [{:keys [addon/id] :as row}]
+                (let [res (merge (:constructor-resolution row) row)]
+                  (when (= :failed (:constructor/status res))
+                    [id (cond-> {:reload/phase phase
+                                 :reload/error (str (or (:constructor/cause-message res)
+                                                        (:constructor/error res)
+                                                        (first (:errors row))))}
+                          (:constructor/symbol res)
+                          (assoc :reload/constructor (str (:constructor/symbol res))))]))))
+        results))
+
+(defn- with-load-failures
+  "Fold `failures` ({id mark}) into `report`: :hot/reload-failures names them,
+   :errors says plainly that each failed and is quarantined, and a
+   :hot/reload-failed diagnostic is set unless one is already there. The facade
+   (hive-addon.hot) records the marks and refuses the next reload that reaches
+   them."
+  [report failures]
+  (if (empty? failures)
+    report
+    (let [line (failures/failed-line (vec (keys failures)) (val (first failures)))]
+      (cond-> (-> report
+                  (assoc :ok? false :hot/reload-failures failures)
+                  (update :errors (fnil conj []) line))
+        (nil? (:diagnostic report))
+        (assoc :diagnostic {:code :hot/reload-failed
+                            :retryable false
+                            :message line})))))
+
 (defrecord RemountStrategy []
   IReloadStrategy
   (-strategy-id [_] :remount)
@@ -327,11 +405,18 @@
                                            (:loaded ns-res)))]
           (cond
             ;; Code that will not load must not take the running system down: refuse
-            ;; BEFORE any teardown, leaving every live instance in place.
+            ;; BEFORE any teardown, leaving every live instance in place. The pass
+            ;; stopped partway, so every addon it was loading for, and every addon
+            ;; whose constructor namespace it touched, is marked :reload/failed:
+            ;; none of them may be remounted onto this half-loaded image.
             (not (:ok? ns-res))
             (-> (refusal (-strategy-id this) ctx (:errors ns-res))
-                (assoc :hot/affected ids)
-                (with-ns-outcome ns-res))
+                (assoc :hot/affected ids
+                       :hot/refused? true
+                       :hot/restored []
+                       :hot/down [])
+                (with-ns-outcome ns-res)
+                (with-load-failures (ns-load-failures specs seeds ns-res)))
 
             (seq stale)
             (stale-refusal (-strategy-id this) ctx ids ns-res stale)
@@ -351,12 +436,18 @@
                   mount-opts       (assoc (:hot/mount-opts ctx {}) :peer-specs specs)
                   ;; Validate the new code BEFORE anything is torn down: a slice
                   ;; whose constructors do not resolve, or that the licence gate
-                  ;; refuses, is refused with every live instance in place.
+                  ;; refuses, is refused with every live instance in place. This
+                  ;; is the all-or-nothing gate of a WIDENED reload: an addon the
+                  ;; reload dragged in whose constructor namespace will not load
+                  ;; refuses the whole slice, so nothing is remounted onto
+                  ;; half-new code, and it is marked :reload/failed.
                   pre              (preflight driver plan host mount-opts)]
               (if (and pre (not (:ok? pre)))
-                (-> (preflight-refusal (-strategy-id this) ctx ids pre)
-                    (with-ns-outcome ns-res)
-                    (with-empty-reload ctx loaded))
+                (cond-> (-> (preflight-refusal (-strategy-id this) ctx ids pre)
+                            (with-ns-outcome ns-res)
+                            (with-empty-reload ctx loaded)
+                            (with-load-failures (ctor-load-failures (:mounted pre) :preflight)))
+                  (seq widened) (assoc :hot/widened widened))
                 ;; Remember what is running, then reverse-order shutdown, then
                 ;; re-drive the ORDINARY mount pipeline over the affected slice.
                 ;; mount! re-resolves each constructor at call time, so the
@@ -385,7 +476,9 @@
                               (with-empty-reload ctx loaded))
                     (seq widened)        (assoc :hot/widened widened)
                     (seq (:cycles plan)) (assoc :hot/cycles (:cycles plan))
-                    (seq errors)         (assoc :errors (vec errors))))))))))))
+                    (seq errors)         (assoc :errors (vec errors))
+                    true                 (with-load-failures
+                                           (ctor-load-failures (:mounted report) :mount))))))))))))
 
 ;; =============================================================================
 ;; Built-in strategy: :restart-required
@@ -441,7 +534,12 @@
                       (with-ns-outcome ns-res))
             (:ok? ns-res)          (with-empty-reload ctx loaded)
             (seq refreshed)        (assoc :hot/contributions-refreshed refreshed)
-            (seq (:errors ns-res)) (assoc :errors (vec (:errors ns-res)))))))))
+            (seq (:errors ns-res)) (assoc :errors (vec (:errors ns-res)))
+            ;; The instance stays (that is :in-place), but the image under it is
+            ;; half-loaded: mark it, so the next pass does not re-run the same
+            ;; partial load.
+            (not (:ok? ns-res))    (with-load-failures
+                                     (ns-load-failures (:hot/specs ctx) [id] ns-res))))))))
 
 ;; =============================================================================
 ;; Built-in strategy: :inert

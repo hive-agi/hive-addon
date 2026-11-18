@@ -96,6 +96,23 @@
    [:ok? :boolean]
    [:errors {:optional true} [:sequential :string]]])
 
+(def ReloadFailure
+  "Why an addon is quarantined after a reload failed to LOAD its code
+   (hive-addon.hot.failures). :reload/phase is where it failed: :ns-load (the
+   namespace pass stopped partway), :preflight (its constructor namespace would
+   not load before teardown) or :mount (it would not load during the remount).
+   The facade adds :reload/status, :reload/at and :reload/attempts when it
+   records the mark. Open."
+  [:map {:closed false}
+   [:reload/phase [:enum :ns-load :preflight :mount]]
+   [:reload/error :string]
+   [:reload/failed-ns {:optional true} :string]
+   [:reload/constructor {:optional true} :string]
+   [:reload/status {:optional true} [:= :reload/failed]]
+   [:reload/at {:optional true} :int]
+   [:reload/attempts {:optional true} pos-int?]
+   [:reload/trigger {:optional true} HotTrigger]])
+
 (def RemountReport
   "Outcome of reloading an addon and its transitive dependents.
 
@@ -128,6 +145,11 @@
    :hot/down are ids with neither. :hot/restored? is present only when
    something failed, true exactly when nothing is down.
 
+   All-or-nothing per addon: :hot/reload-failures {id ReloadFailure} names the
+   addons this reload failed to LOAD. They keep their previous instance and are
+   quarantined: :hot/quarantined {seed [id ...]} on a later report names the
+   seeds REFUSED, without loading anything, because their slice reached one.
+
    :hot/strategy names the strategy that ran. :teardown/data-preserved? is a
    COMPUTED verdict (hive-addon.hot.report/data-preserved?) over the teardowns
    that released something — no longer true by construction. Open."
@@ -155,6 +177,8 @@
    [:hot/restored {:optional true} [:sequential s/AddonId]]
    [:hot/down {:optional true} [:sequential s/AddonId]]
    [:hot/restored? {:optional true} :boolean]
+   [:hot/reload-failures {:optional true} [:map-of s/AddonId ReloadFailure]]
+   [:hot/quarantined {:optional true} [:map-of s/AddonId [:sequential s/AddonId]]]
    [:teardown/data-preserved? :boolean]
    [:mounted [:sequential ms/MountResult]]
    [:ok? :boolean]
