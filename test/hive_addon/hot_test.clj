@@ -43,7 +43,10 @@
 (defn- reset-all! [f]
   (fx/reset-fixture!)
   (strategy/reset-strategies!)
-  (try (f) (finally (strategy/reset-strategies!))))
+  ;; A failed reload quarantines the addon it failed to load; a test that
+  ;; provokes one must not refuse the next test's reload of the same probe id.
+  (hot/clear-reload-failures!)
+  (try (f) (finally (strategy/reset-strategies!) (hot/clear-reload-failures!))))
 
 (use-fixtures :each reset-all!)
 

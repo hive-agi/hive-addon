@@ -15,6 +15,7 @@
      hive-addon.hot.source    — where an addon's source lives (:local/root vs jar)
      hive-addon.hot.cascade   — pure: which addons a reload touches, in what order
      hive-addon.hot.strategy  — OCP: how each addon is reloaded
+     hive-addon.hot.failures  — addons a reload failed to load, quarantined
      hive-addon.hot           — this facade: wiring, triggering, reporting
 
    hive-hot is a SOFT dependency, resolved through the var at call time and never
@@ -31,6 +32,7 @@
    :no-reload and the hazard cannot be tripped."
   (:require [hive-addon.diagnostic :as diagnostic]
             [hive-addon.hot.cascade :as cascade]
+            [hive-addon.hot.failures :as failures]
             [hive-addon.hot.mount-driver :as driver]
             [hive-addon.hot.source :as source]
             [hive-addon.hot.strategy :as strategy]
@@ -59,10 +61,13 @@
    satisfying the new protocol, producing \"No implementation of method ... for
    class X\" for a class whose name matches perfectly. The mount and hot
    namespaces are pinned for the same reason — they hold the registry state and
-   the strategy chain a reload would otherwise reset mid-flight."
+   the strategy chain a reload would otherwise reset mid-flight.
+   hive-addon.hot.failures holds which addons a reload left half-loaded; a
+   reload of it must not forget them."
   '#{hive-addon.protocol
      hive-addon.mount.port
      hive-addon.hot
+     hive-addon.hot.failures
      hive-addon.hot.port
      hive-addon.hot.strategy})
 
@@ -91,15 +96,27 @@
 
 (m/=> available? [:=> [:cat] :boolean])
 
+(defn- load-error
+  "The message of a load failure, with its innermost cause after it: a
+   CompilerException says only where (\"Syntax error compiling at (f.clj:3:1).\"),
+   its cause says what (\"Unable to resolve symbol: ...\")."
+  [^Throwable t]
+  (let [root (loop [c t] (if-let [n (ex-cause c)] (recur n) c))
+        msg  (or (ex-message t) (.getName (class t)))]
+    (if (identical? root t)
+      msg
+      (str msg " Root cause: " (or (ex-message root) (.getName (class root)))))))
+
 (defn- require-reload!
   "Fallback namespace reloader for when hive-hot is absent: reload each namespace
    directly. No dependency cascade at the namespace level — that is precisely
    what hive-hot/clj-reload provides and this substitute does not."
   [ns-strs]
   (reduce (fn [acc ns-str]
-            (let [res (r/try-effect (require (symbol ns-str) :reload))]
-              (if (r/err? res)
-                (reduced (assoc acc :failed (symbol ns-str) :error (:message res)))
+            (let [res (try (require (symbol ns-str) :reload) nil
+                           (catch Throwable t t))]
+              (if res
+                (reduced (assoc acc :failed (symbol ns-str) :error (load-error res)))
                 (update acc :loaded conj (symbol ns-str)))))
           {:loaded []}
           ns-strs))
@@ -270,12 +287,16 @@
    that resolve to different strategies — each group runs its own strategy and
    the outcomes are reported together rather than one shadowing the others.
    Every verdict is folded, never re-asserted: data is preserved only if every
-   group says so, and what is restored or down is the union of the groups'."
+   group says so, and what is restored or down is the union of the groups'.
+   Load failures and quarantine refusals are unioned too, so a refused or
+   failed group is never hidden behind a sibling that succeeded."
   [reports opts]
   (if (= 1 (count reports))
     (first reports)
-    (let [restored (into [] (mapcat :hot/restored) reports)
-          down     (into [] (mapcat :hot/down) reports)]
+    (let [restored    (into [] (mapcat :hot/restored) reports)
+          down        (into [] (mapcat :hot/down) reports)
+          failed      (into (sorted-map) (keep :hot/reload-failures) reports)
+          quarantined (into {} (keep :hot/quarantined) reports)]
       (cond-> {:hot/trigger (or (:trigger opts) :manual)
                :hot/strategy (if-let [ss (seq (distinct (map :hot/strategy reports)))]
                                (if (= 1 (count ss)) (first ss) :hot/mixed)
@@ -291,6 +312,9 @@
                :errors (into [] (mapcat #(or (:errors %) [])) reports)}
         (seq restored) (assoc :hot/restored restored)
         (seq down)     (assoc :hot/down down)
+        (seq failed)   (assoc :hot/reload-failures failed)
+        (seq quarantined) (assoc :hot/quarantined quarantined)
+        (some :hot/refused? reports) (assoc :hot/refused? true)
         (some #(contains? % :hot/restored?) reports) (assoc :hot/restored? (empty? down))))))
 
 ;; =============================================================================
@@ -299,12 +323,72 @@
 
 (defonce ^:private reload-flight-lock (Object.))
 
+(defn- quarantine-report
+  "Refuse `blocked` ({seed [marked-id ...]}) without touching anything: no
+   namespace is loaded, nothing is torn down, the previous instances keep
+   serving. :hot/quarantined names what each seed reached, and
+   :hot/reload-failures carries the marks that caused it, error included."
+  [blocked marks opts]
+  (let [hit   (into (sorted-set) (mapcat val) blocked)
+        lines (mapv (fn [[seed hits]] (failures/refusal-line seed hits marks)) blocked)]
+    {:hot/trigger (or (:trigger opts) :manual)
+     :hot/strategy :hot/none
+     :hot/seeds (set (keys blocked))
+     :hot/affected []
+     :hot/torn-down []
+     :hot/refused? true
+     :hot/restored []
+     :hot/down []
+     :hot/quarantined (into {} blocked)
+     :hot/reload-failures (into (sorted-map) (select-keys marks hit))
+     :teardown/data-preserved? (verdict/data-preserved? [])
+     :mounted []
+     :ok? false
+     :diagnostic {:code :hot/reload-quarantined
+                  :retryable false
+                  :message (first lines)
+                  :actions [{:tool "hot" :arguments {:command "reload"
+                                                     :addon (first (sort hit))
+                                                     :force true}}]}
+     :errors lines}))
+
+(defn- run-seeds!
+  "Group `seeds` by the strategy each selects and run every group once."
+  [host specs by-id seeds opts]
+  (let [chain (or (:strategies opts) (strategy/installed-strategies))
+        ;; Group by the strategy each seed selects, under its own context.
+        grouped (group-by
+                 (fn [id]
+                   (let [spec (by-id id)
+                         ctx  (reload-ctx host specs spec #{id} opts)
+                         sel  (strategy/select spec ctx chain)]
+                     (if (r/err? sel) :hot/none (strategy/-strategy-id (:ok sel)))))
+                 (sort seeds))]
+    (mapv (fn [[_sid ids]]
+            (let [group (set ids)
+                  spec  (by-id (first (sort group)))
+                  ctx   (reload-ctx host specs spec group opts)]
+              (strategy/reload! spec ctx)))
+          grouped)))
+
 (defn reload-seeds!
   "Reload `seed-ids` and every addon that depends on them.
 
    Seeds are grouped by the strategy each one selects, so a system mixing
    strategies reloads each group under its own policy exactly once — rather than
    letting one seed's strategy decide for addons that asked for something else.
+
+   All-or-nothing per addon. A reload that fails to LOAD an addon's code (the
+   namespace pass stops, or its constructor namespace will not load) remounts
+   nothing of it: the previous instance keeps serving and the addon is marked
+   :reload/failed (hive-addon.hot.failures), named in the report under
+   :hot/reload-failures. A later reload whose slice reaches a marked addon is
+   REFUSED before any namespace is loaded (:hot/refused?, :hot/quarantined),
+   so a poller does not re-run a known-bad load into the image on every pass;
+   a refusal does not count as an attempt. opts :retry-failed? true, or
+   :force? true, runs the reload anyway: the marks it reaches are lifted when
+   it succeeds and kept, attempts counted, when it fails again. A successful
+   remount of an addon also lifts its mark, and a restart lifts them all.
 
    Returns a RemountReport."
   [host specs seed-ids & [opts]]
@@ -315,7 +399,12 @@
           specs    (into [] (remove #(contains? asleep (:addon/id %))) specs)
           by-id    (into {} (map (juxt :addon/id identity)) specs)
           seeds    (into #{} (filter by-id) seed-ids)
-          slept    (into [] (comp (filter asleep) (distinct)) seed-ids)]
+          slept    (into [] (comp (filter asleep) (distinct)) seed-ids)
+          closure  (fn [seed] (cascade/dependents specs #{seed} (:solve-opts opts {})))
+          retry?   (boolean (or (:retry-failed? opts) (:force? opts)))
+          marks    (failures/failures)
+          blocked  (if retry? {} (failures/blocked seeds closure marks))
+          runnable (into #{} (remove #(contains? blocked %)) seeds)]
       (cond
         (and (empty? seeds) (seq slept))
         (dormant-report slept opts)
@@ -324,21 +413,17 @@
         (not-found-report seed-ids opts)
 
         :else
-        (let [chain (or (:strategies opts) (strategy/installed-strategies))
-              ;; Group by the strategy each seed selects, under its own context.
-              grouped (group-by
-                       (fn [id]
-                         (let [spec (by-id id)
-                               ctx  (reload-ctx host specs spec #{id} opts)
-                               sel  (strategy/select spec ctx chain)]
-                           (if (r/err? sel) :hot/none (strategy/-strategy-id (:ok sel)))))
-                       (sort seeds))
-              reports (mapv (fn [[_sid ids]]
-                              (let [group (set ids)
-                                    spec  (by-id (first (sort group)))
-                                    ctx   (reload-ctx host specs spec group opts)]
-                                (strategy/reload! spec ctx)))
-                            grouped)]
+        (let [ran     (if (seq runnable) (run-seeds! host specs by-id runnable opts) [])
+              ;; Only what RAN is recorded: a quarantine refusal carries the
+              ;; marks that caused it, and must not count as another attempt.
+              _       (when (seq ran)
+                        (let [outcome (merge-reports ran opts)]
+                          (when retry?
+                            (failures/clear! (remove (set (keys (:hot/reload-failures outcome)))
+                                                     (into #{} (mapcat closure) runnable))))
+                          (failures/record! outcome (System/currentTimeMillis))))
+              reports (cond-> ran
+                        (seq blocked) (conj (quarantine-report blocked marks opts)))]
           (cond-> (merge-reports reports opts)
             (seq slept) (assoc :hot/dormant slept
                                :hot/dormant-hint (dormant-hint slept))))))))
@@ -485,9 +570,32 @@
         [:ok? :boolean]
         [:hot/unregistered [:vector :any]]]])
 
+(defn reload-failures
+  "{addon-id mark} of every addon whose last reload failed to load its code and
+   is quarantined: its previous instance keeps serving and every reload that
+   reaches it is refused until a restart, a reload with :retry-failed? (or
+   :force?), or a successful remount. A mark is
+   {:reload/status :reload/failed :reload/phase :ns-load|:preflight|:mount
+    :reload/error string :reload/at epoch-ms :reload/attempts n ...}."
+  []
+  (failures/failures))
+
+(m/=> reload-failures [:=> [:cat] [:map-of :any [:map-of :keyword :any]]])
+
+(defn clear-reload-failures!
+  "Lift the :reload/failed mark from `ids` (every mark with no ids), so the next
+   reload of them runs. Returns the remaining marks."
+  ([] (failures/clear!))
+  ([ids] (failures/clear! ids)))
+
+(m/=> clear-reload-failures!
+      [:function
+       [:=> [:cat] [:map-of :any :any]]
+       [:=> [:cat Ids] [:map-of :any :any]]])
+
 (defn status
-  "Current hot-reload status: hive-hot availability, its component registry, and
-   the installed strategy chain.
+  "Current hot-reload status: hive-hot availability, its component registry, the
+   installed strategy chain, and the addons quarantined by a failed reload.
 
    Every value is DATA. This report is rendered by tool surfaces that serialize
    it, so `no-reload` is projected to strings here rather than handed over as
@@ -504,6 +612,7 @@
     {:hot/available? (available?)
      :hot/strategies (mapv strategy/-strategy-id (strategy/installed-strategies))
      :hot/no-reload (mapv str (sort no-reload))
+     :hot/reload-failures (wire/json-safe (reload-failures))
      :hot/hive-hot (when hot-status (wire/json-safe (hot-status)))}))
 
 (m/=> status
@@ -512,6 +621,7 @@
         [:hot/available? :boolean]
         [:hot/strategies [:vector :any]]
         [:hot/no-reload [:vector :string]]
+        [:hot/reload-failures [:map-of :any [:map-of :keyword :any]]]
         [:hot/hive-hot [:maybe [:map-of :any :any]]]]])
 
 ;; =============================================================================

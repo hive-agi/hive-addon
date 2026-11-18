@@ -49,7 +49,8 @@
             [hive-addon.wire]
             [malli.core :as m]
             [hive-addon.hot.strategy :as strategy]
-            [hive-addon.tool-contract.check]))
+            [hive-addon.tool-contract.check]
+            [hive-addon.hot.failures]))
 
 ;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
 ;;
@@ -413,6 +414,23 @@
         [:retained [:vector :any]]
         [:shared [:map-of :any [:vector :any]]]
         [:reason {:optional true} :string]]])
+
+(def ^:private FailureMarks
+  "hive-addon.hot.failures marks: {addon-id {:reload/... any}}."
+  [:map-of :any [:map-of :keyword :any]])
+
+(m/=> hive-addon.hot.failures/failures [:=> [:cat] FailureMarks])
+(m/=> hive-addon.hot.failures/failed? [:=> [:cat :any] :boolean])
+(m/=> hive-addon.hot.failures/clear!
+      [:function
+       [:=> [:cat] FailureMarks]
+       [:=> [:cat Ids] FailureMarks]])
+(m/=> hive-addon.hot.failures/blocked
+      [:=> [:cat Ids ifn? [:or [:set :any] AnyMap]] [:map-of :any [:vector :any]]])
+(m/=> hive-addon.hot.failures/refusal-line [:=> [:cat :any [:sequential :any] AnyMap] :string])
+(m/=> hive-addon.hot.failures/failed-line [:=> [:cat [:sequential :any] AnyMap] :string])
+(m/=> hive-addon.hot.failures/next-marks [:=> [:cat FailureMarks AnyMap :int] FailureMarks])
+(m/=> hive-addon.hot.failures/record! [:=> [:cat AnyMap :int] FailureMarks])
 
 ;; =============================================================================
 ;; lifecycle.*: pure policy, surface, oracle, in-memory store
