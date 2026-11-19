@@ -208,3 +208,20 @@
     (is (true? (hport/-enter! gate "probe.a")) "a re-injected addon is admitted again")
     (is (nil? (hs/humanize-errors hs/EjectReport report))
         (pr-str (hs/humanize-errors hs/EjectReport report)))))
+
+(deftest a-drain-from-within-a-call-does-not-wait-for-that-call
+  (let [gate (drain/atom-drain-gate)
+        from-inside (drain/tracked gate "probe.a"
+                                   (fn [] (drain/drain! gate ["probe.a"] (merge (stub-clock) {:drain-ms 1000}))))]
+    (testing "the calling thread's own call is not waited for"
+      (let [dr (from-inside)]
+        (is (= {} (:hot/in-flight dr)))
+        (is (zero? (:hot/waited-ms dr)))))
+    (testing "another thread's call still is"
+      (drain/open! gate ["probe.a"])
+      (let [held (promise) release (promise)
+            other (future ((drain/tracked gate "probe.a" (fn [] (deliver held true) @release))))]
+        @held
+        (try
+          (is (= {"probe.a" 1} (:hot/in-flight (from-inside))))
+          (finally (deliver release true) @other))))))

@@ -80,6 +80,12 @@
 
 (m/=> draining-message [:=> [:cat :any] :string])
 
+(def ^:dynamic *calling*
+  "{id n}: the admitted calls the current thread is inside of, per addon id. A
+   drain started from within a call of the addon it drains (a reload of an
+   addon its own tool asked for) does not wait for that call."
+  {})
+
 (defn tracked
   "HANDLER as a call to addon ID admitted through GATE (default `drain-gate`).
    An admitted call is counted until it returns or throws. A call arriving while
@@ -88,7 +94,8 @@
   ([gate id handler]
    (fn tracked-handler [& args]
      (if (hport/-enter! gate id)
-       (try (apply handler args)
+       (try (binding [*calling* (update *calling* id (fnil inc 0))]
+              (apply handler args))
             (finally (hport/-leave! gate id)))
        (throw (ex-info (draining-message id) {:error :hot/draining :addon/id id}))))))
 
@@ -138,9 +145,10 @@
   25)
 
 (defn in-flight
-  "{id n} for the IDS that still have calls in flight under GATE."
+  "{id n} for the IDS that still have calls in flight under GATE, not counting
+   the calls the current thread is inside of (`*calling*`)."
   [gate ids]
-  (into {} (keep (fn [id] (let [n (hport/-in-flight gate id)]
+  (into {} (keep (fn [id] (let [n (- (hport/-in-flight gate id) (get *calling* id 0))]
                             (when (pos? n) [id n]))))
         ids))
 
