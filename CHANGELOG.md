@@ -20,6 +20,18 @@ not declare, is neither.
 
 ## [Unreleased]
 
+### Fixed
+
+- The `:remount` reload strategy now drains the slice's calls in flight before
+  it tears anything down, through the same drain `eject!` runs
+  (`hive-addon.hot.drain/drained!`, now shared by both). New calls to the slice
+  are refused until the new instances are mounted. A call still running when
+  `:drain-ms` runs out refuses the remount (`:hot/busy?`, `:hot/refused?`,
+  nothing torn down) unless `:force? true`, which goes ahead and says so
+  (`:hot/forced?`). The wait is reported under `:hot/drain` in the
+  RemountReport. Previously a remount could shut an addon down under a running
+  tool call, whose effects then landed on the dead instance.
+
 ## [1.1.0] - 2026-09-30
 
 ### Added

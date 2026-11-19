@@ -591,19 +591,17 @@
                            ": " (pr-str blocking) " — pass :cascade? true to remount them without it")])
 
       :else
-      (let [gate    (or (:drain-gate opts) (drain/drain-gate))
-            closing (into (vec known) blocking)
-            dr      (drain/drain! gate closing (select-keys opts [:drain-ms :poll-ms :now :sleep!]))
-            v       (drain/drain-verdict dr (:force? opts))]
-        (if (= :busy v)
-          (do (drain/open! gate closing)
-              (assoc base :ok? false :hot/busy? true :hot/drain dr
-                     :errors [(drain/busy-message dr)]))
-          (try
-            (cond-> (assoc (eject-slice! host opts base known by-id mounted blocking)
-                           :hot/drain dr)
-              (= :forced v) (assoc :hot/forced? true))
-            (finally (drain/open! gate closing))))))))
+      (drain/drained!
+       (or (:drain-gate opts) (drain/drain-gate))
+       (into (vec known) blocking)
+       opts
+       (fn [dr]
+         (assoc base :ok? false :hot/busy? true :hot/drain dr
+                :errors [(drain/busy-message dr)]))
+       (fn [dr v]
+         (cond-> (assoc (eject-slice! host opts base known by-id mounted blocking)
+                        :hot/drain dr)
+           (= :forced v) (assoc :hot/forced? true)))))))
 
 (m/=> eject! [:=> [:cat :any Specs :any [:? Opts]] hs/EjectReport])
 

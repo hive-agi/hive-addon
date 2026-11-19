@@ -32,6 +32,7 @@
    :no-reload and the hazard cannot be tripped."
   (:require [hive-addon.diagnostic :as diagnostic]
             [hive-addon.hot.cascade :as cascade]
+            [hive-addon.hot.drain :as drain]
             [hive-addon.hot.failures :as failures]
             [hive-addon.hot.mount-driver :as driver]
             [hive-addon.hot.source :as source]
@@ -213,6 +214,22 @@
   [sym]
   (some-> (find-var sym) deref))
 
+(defn- reload-drain
+  "The :hot/drained! a remount runs its teardown under: hive-addon.hot.drain's
+   `drained!` over the process-wide gate the host's dispatch wrap counts calls
+   through (or opts :drain-gate), the SAME drain eject! runs. Bounded by
+   :drain-ms (default hive-addon.hot.drain/default-drain-ms); calls still
+   running then refuse the remount unless :force? true.
+
+   (fn [ids on-busy f]): ON-BUSY is called with the DrainReport and the
+   drain's busy line; F with the DrainReport and the verdict."
+  [{:keys [drain-gate] :as opts}]
+  (fn [ids on-busy f]
+    (drain/drained! (or drain-gate (drain/drain-gate)) ids
+                    (select-keys opts [:drain-ms :poll-ms :now :sleep! :force?])
+                    (fn [dr] (on-busy dr (drain/busy-message dr)))
+                    f)))
+
 (defn- reload-ctx
   [host specs spec seeds {:keys [trigger changed-ns ns-reloaded? mount-opts
                                  solve-opts strategies reload-ns! mount-driver
@@ -235,6 +252,7 @@
      :hot/strategies strategies
      :hot/reload-ns! (or reload-ns! (ns-reloader roots {:force? force?}))
      :hot/resolve-contribution resolve-contribution
+     :hot/drained! (reload-drain opts)
      ;; The probe verifies the DEFAULT reloader's claim. A caller that injects
      ;; its own reloader answers for it — unless it injects a probe as well.
      :hot/ctor-probe (or ctor-probe (when-not reload-ns! constructor-probe))}))

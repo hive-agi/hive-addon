@@ -211,4 +211,32 @@
        (pr-str (into (sorted-map) (:hot/in-flight report)))
        "; retry, raise :drain-ms, or pass :force? true"))
 
+;; =============================================================================
+;; drained! — the one drain every plug OUT and every remount goes through
+;; =============================================================================
+
+(defn drained!
+  "Drain IDS through GATE, then act on the verdict. This is the single drain
+   eject! and the :remount strategy share: close the gate, wait up to
+   :drain-ms for the admitted calls, read `drain-verdict` under :force?.
+
+   :busy (calls still running, no :force?): the gate is re-opened at once and
+   (ON-BUSY report) is answered; nothing else runs.
+   :drained or :forced: (F report verdict) runs with the gate still CLOSED, so
+   no new call reaches an instance being torn down, and the gate is re-opened
+   after F however it ends.
+
+   opts: drain!'s {:drain-ms :poll-ms :now :sleep!} plus :force?."
+  [gate ids opts on-busy f]
+  (let [ids (vec (distinct ids))
+        dr  (drain! gate ids (select-keys opts [:drain-ms :poll-ms :now :sleep!]))
+        v   (drain-verdict dr (:force? opts))]
+    (if (= :busy v)
+      (do (open! gate ids)
+          (on-busy dr))
+      (try (f dr v)
+           (finally (open! gate ids))))))
+
+(m/=> drained! [:=> [:cat Gate Ids Opts ifn? ifn?] :any])
+
 (m/=> busy-message [:=> [:cat [:map-of :any :any]] :string])
