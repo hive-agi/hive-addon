@@ -113,8 +113,24 @@
    [:reload/attempts {:optional true} pos-int?]
    [:reload/trigger {:optional true} HotTrigger]])
 
+(def DrainReport
+  "What hive-addon.hot.drain/drain! answers: the ids whose gate it closed, the
+   calls still in flight when the wait ended ({id n}, empty when drained), how
+   long it waited and the bound it waited under. Open."
+  [:map {:closed false}
+   [:hot/draining [:sequential s/AddonId]]
+   [:hot/in-flight [:map-of s/AddonId pos-int?]]
+   [:hot/waited-ms nat-int?]
+   [:hot/drain-ms nat-int?]])
+
 (def RemountReport
   "Outcome of reloading an addon and its transitive dependents.
+
+   :hot/drain is the DrainReport of the wait for the slice's calls in flight
+   that ran before the teardown (the same drain eject! runs). :hot/busy? true
+   means calls were still running when :drain-ms ran out, so the remount was
+   refused (:hot/refused?) with nothing torn down; :hot/forced? true means it
+   went ahead anyway under :force? true.
 
    :hot/seeds are the directly-changed addon ids; :hot/affected is the
    topo-ordered closure actually acted on (deps before dependents) and always
@@ -179,6 +195,9 @@
    [:hot/restored? {:optional true} :boolean]
    [:hot/reload-failures {:optional true} [:map-of s/AddonId ReloadFailure]]
    [:hot/quarantined {:optional true} [:map-of s/AddonId [:sequential s/AddonId]]]
+   [:hot/drain {:optional true} DrainReport]
+   [:hot/busy? {:optional true} :boolean]
+   [:hot/forced? {:optional true} :boolean]
    [:teardown/data-preserved? :boolean]
    [:mounted [:sequential ms/MountResult]]
    [:ok? :boolean]
@@ -229,16 +248,6 @@
    [:discovery-errors {:optional true} [:sequential :any]]
    [:ok? :boolean]
    [:errors {:optional true} [:sequential :string]]])
-
-(def DrainReport
-  "What hive-addon.hot.drain/drain! answers: the ids whose gate it closed, the
-   calls still in flight when the wait ended ({id n}, empty when drained), how
-   long it waited and the bound it waited under. Open."
-  [:map {:closed false}
-   [:hot/draining [:sequential s/AddonId]]
-   [:hot/in-flight [:map-of s/AddonId pos-int?]]
-   [:hot/waited-ms nat-int?]
-   [:hot/drain-ms nat-int?]])
 
 (def EjectReport
   "Outcome of plugging addons OUT of a running host

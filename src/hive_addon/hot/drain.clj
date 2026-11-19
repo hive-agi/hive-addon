@@ -80,6 +80,12 @@
 
 (m/=> draining-message [:=> [:cat :any] :string])
 
+(def ^:dynamic *calling*
+  "{id n}: the admitted calls the current thread is inside of, per addon id. A
+   drain started from within a call of the addon it drains (a reload of an
+   addon its own tool asked for) does not wait for that call."
+  {})
+
 (defn tracked
   "HANDLER as a call to addon ID admitted through GATE (default `drain-gate`).
    An admitted call is counted until it returns or throws. A call arriving while
@@ -88,7 +94,8 @@
   ([gate id handler]
    (fn tracked-handler [& args]
      (if (hport/-enter! gate id)
-       (try (apply handler args)
+       (try (binding [*calling* (update *calling* id (fnil inc 0))]
+              (apply handler args))
             (finally (hport/-leave! gate id)))
        (throw (ex-info (draining-message id) {:error :hot/draining :addon/id id}))))))
 
@@ -138,9 +145,10 @@
   25)
 
 (defn in-flight
-  "{id n} for the IDS that still have calls in flight under GATE."
+  "{id n} for the IDS that still have calls in flight under GATE, not counting
+   the calls the current thread is inside of (`*calling*`)."
   [gate ids]
-  (into {} (keep (fn [id] (let [n (hport/-in-flight gate id)]
+  (into {} (keep (fn [id] (let [n (- (hport/-in-flight gate id) (get *calling* id 0))]
                             (when (pos? n) [id n]))))
         ids))
 
@@ -210,5 +218,33 @@
   (str "calls still in flight after " (:hot/waited-ms report) " ms: "
        (pr-str (into (sorted-map) (:hot/in-flight report)))
        "; retry, raise :drain-ms, or pass :force? true"))
+
+;; =============================================================================
+;; drained! — the one drain every plug OUT and every remount goes through
+;; =============================================================================
+
+(defn drained!
+  "Drain IDS through GATE, then act on the verdict. This is the single drain
+   eject! and the :remount strategy share: close the gate, wait up to
+   :drain-ms for the admitted calls, read `drain-verdict` under :force?.
+
+   :busy (calls still running, no :force?): the gate is re-opened at once and
+   (ON-BUSY report) is answered; nothing else runs.
+   :drained or :forced: (F report verdict) runs with the gate still CLOSED, so
+   no new call reaches an instance being torn down, and the gate is re-opened
+   after F however it ends.
+
+   opts: drain!'s {:drain-ms :poll-ms :now :sleep!} plus :force?."
+  [gate ids opts on-busy f]
+  (let [ids (vec (distinct ids))
+        dr  (drain! gate ids (select-keys opts [:drain-ms :poll-ms :now :sleep!]))
+        v   (drain-verdict dr (:force? opts))]
+    (if (= :busy v)
+      (do (open! gate ids)
+          (on-busy dr))
+      (try (f dr v)
+           (finally (open! gate ids))))))
+
+(m/=> drained! [:=> [:cat Gate Ids Opts ifn? ifn?] :any])
 
 (m/=> busy-message [:=> [:cat [:map-of :any :any]] :string])
