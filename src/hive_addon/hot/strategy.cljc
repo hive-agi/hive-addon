@@ -377,6 +377,43 @@
                             :retryable false
                             :message line})))))
 
+;; =============================================================================
+;; Drain — no teardown under a running call
+;; =============================================================================
+
+(defn- busy-refusal
+  "Refuse a remount whose addons still had calls running when the drain bound
+   ran out. Nothing was torn down and calls are admitted again: the previous
+   instances keep serving. MESSAGE is the drain's own busy line."
+  [strategy-id ctx ids dr message]
+  (-> (refusal strategy-id ctx [message])
+      (assoc :hot/affected ids
+             :hot/refused? true
+             :hot/busy? true
+             :hot/drain dr
+             :hot/restored []
+             :hot/down [])))
+
+(defn- with-drain
+  "Run TEARDOWN-AND-MOUNT (0-arg, answers a report) drained, through the
+   context's :hot/drained! — (fn [ids on-busy f]), the host's binding of
+   hive-addon.hot.drain/drained!, the same drain eject! runs. Calls to IDS stop
+   being admitted, the admitted ones are waited for (bounded), and only then
+   does the teardown run, with the gate still closed until the new instances are
+   mounted. The report carries :hot/drain, and :hot/forced? when calls were still
+   running and the caller forced it. Calls still running without force answer
+   (ON-BUSY drain-report message) and nothing is torn down.
+
+   A context without :hot/drained! (no host drain, e.g. a portable runtime)
+   runs TEARDOWN-AND-MOUNT directly."
+  [ctx ids on-busy teardown-and-mount]
+  (if-let [drained! (:hot/drained! ctx)]
+    (drained! ids on-busy
+              (fn [dr verdict]
+                (cond-> (assoc (teardown-and-mount) :hot/drain dr)
+                  (= :forced verdict) (assoc :hot/forced? true))))
+    (teardown-and-mount)))
+
 (defrecord RemountStrategy []
   IReloadStrategy
   (-strategy-id [_] :remount)
@@ -456,29 +493,41 @@
                 ;; slice. A member whose new instance fails is put back to the
                 ;; snapshot IN ORDER (:fallback-instance), so its dependents
                 ;; receive a live sibling rather than a shut-down one.
-                (let [snap    (snapshot driver host ids)
-                      td      (hport/-teardown! driver host ids)
-                      report  (hport/-mount! driver plan host
-                                             (cond-> mount-opts
-                                               (seq snap) (assoc :fallback-instance
-                                                                 (comp snap :addon/id))))
-                      outcome (verdict/remount-outcome ids report)
-                      errors  (into (vec (:errors td)) (mount-errors report))]
-                  (cond-> (-> (base-report (-strategy-id this) ctx)
-                              (with-teardowns [td])
-                              (merge outcome)
-                              (assoc :hot/affected ids
-                                     :hot/torn-down (vec (:torn-down td))
-                                     :hot/ns-reloaded loaded
-                                     :mounted (vec (:mounted report))
-                                     :ok? (and (:ok? report) (empty? (:errors td))))
-                              (with-ns-outcome ns-res)
-                              (with-empty-reload ctx loaded))
-                    (seq widened)        (assoc :hot/widened widened)
-                    (seq (:cycles plan)) (assoc :hot/cycles (:cycles plan))
-                    (seq errors)         (assoc :errors (vec errors))
-                    true                 (with-load-failures
-                                           (ctor-load-failures (:mounted report) :mount))))))))))))
+                ;;
+                ;; All of it runs DRAINED (`with-drain`): no call of the slice is
+                ;; still running on an instance about to be shut down, and none
+                ;; is admitted until the new instances are mounted.
+                (with-drain
+                  ctx ids
+                  (fn [dr message]
+                    (cond-> (-> (busy-refusal (-strategy-id this) ctx ids dr message)
+                                (with-ns-outcome ns-res)
+                                (with-empty-reload ctx loaded))
+                      (seq widened) (assoc :hot/widened widened)))
+                  (fn []
+                    (let [snap    (snapshot driver host ids)
+                          td      (hport/-teardown! driver host ids)
+                          report  (hport/-mount! driver plan host
+                                                 (cond-> mount-opts
+                                                   (seq snap) (assoc :fallback-instance
+                                                                     (comp snap :addon/id))))
+                          outcome (verdict/remount-outcome ids report)
+                          errors  (into (vec (:errors td)) (mount-errors report))]
+                      (cond-> (-> (base-report (-strategy-id this) ctx)
+                                  (with-teardowns [td])
+                                  (merge outcome)
+                                  (assoc :hot/affected ids
+                                         :hot/torn-down (vec (:torn-down td))
+                                         :hot/ns-reloaded loaded
+                                         :mounted (vec (:mounted report))
+                                         :ok? (and (:ok? report) (empty? (:errors td))))
+                                  (with-ns-outcome ns-res)
+                                  (with-empty-reload ctx loaded))
+                        (seq widened)        (assoc :hot/widened widened)
+                        (seq (:cycles plan)) (assoc :hot/cycles (:cycles plan))
+                        (seq errors)         (assoc :errors (vec errors))
+                        true                 (with-load-failures
+                                               (ctor-load-failures (:mounted report) :mount))))))))))))))
 
 ;; =============================================================================
 ;; Built-in strategy: :restart-required
