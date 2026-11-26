@@ -19,13 +19,18 @@ jobs:
     name: jvm suite
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: DeLaGuardo/setup-clojure@13.0
+      - uses: actions/setup-java@v6
         with:
-          cli: latest
+          distribution: temurin
+          java-version: '25'
 
-      - uses: actions/cache@v4
+      - uses: DeLaGuardo/setup-clojure@13.7.0
+        with:
+          cli: 1.12.7.1681
+
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.m2/repository
@@ -39,7 +44,7 @@ jobs:
     name: tri-runtime oracle
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # hive-dsl is a Maven dep for the JVM, but cljw resolves only :git/url and
       # :local/root, so every host is fed SOURCE. The tag is read out of deps.edn
@@ -53,7 +58,7 @@ jobs:
           echo "version=$VER" >> "$GITHUB_OUTPUT"
           echo "hive-dsl pinned to v$VER (from deps.edn)"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: hive-agi/hive-dsl
           ref: v${{ steps.dsl.outputs.version }}
@@ -70,7 +75,7 @@ jobs:
           echo "version=$VER" >> "$GITHUB_OUTPUT"
           echo "malli pinned to $VER (from run.sh)"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: metosin/malli
           ref: ${{ steps.malli.outputs.version }}
@@ -82,17 +87,22 @@ jobs:
           [ -n "$VER" ] || { echo "could not read the dynaload version out of malli/deps.edn"; exit 1; }
           echo "version=$VER" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: borkdude/dynaload
           ref: v${{ steps.dynaload.outputs.version }}
           path: dynaload
 
-      - uses: DeLaGuardo/setup-clojure@13.0
+      - uses: actions/setup-java@v6
         with:
-          cli: latest
+          distribution: temurin
+          java-version: '25'
 
-      - uses: actions/cache@v4
+      - uses: DeLaGuardo/setup-clojure@13.7.0
+        with:
+          cli: 1.12.7.1681
+
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.m2/repository
@@ -115,7 +125,7 @@ jobs:
           chmod +x "$HOME/.local/bin/cljw"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: BuddhiLW/clojurust
           path: clojurust
@@ -149,24 +159,24 @@ jobs:
     name: cljs oracle
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # ClojureScript 1.12.x bundles a Closure Compiler built for Java 21; the
       # runner's default JDK 17 fails every compile with UnsupportedClassVersionError.
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
-          java-version: '21'
+          java-version: '25'
 
-      - uses: DeLaGuardo/setup-clojure@13.0
+      - uses: DeLaGuardo/setup-clojure@13.7.0
         with:
-          cli: latest
+          cli: 1.12.7.1681
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '26'
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.m2/repository
