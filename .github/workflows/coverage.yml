@@ -23,18 +23,26 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
-          java-version: '21'
+          java-version: '25'
       - name: Setup Clojure CLI
         run: |
           set -euo pipefail
           curl -fsSL -o /tmp/clj-install.sh \
-            https://download.clojure.org/install/linux-install-1.12.4.1618.sh
+            https://download.clojure.org/install/linux-install-1.12.7.1681.sh
           chmod +x /tmp/clj-install.sh
           sudo /tmp/clj-install.sh
+      - name: Cache Maven and gitlibs
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.gitlibs
+          key: cljdeps-${{ hashFiles('deps.edn') }}
+          restore-keys: cljdeps-
       - name: Cloverage
         run: |
           set -euo pipefail
@@ -45,7 +53,7 @@ jobs:
             --no-html --text --summary --codecov --fail-threshold 0 -o target/coverage \
             | tee coverage-summary.txt
           { echo '## Line coverage'; echo '```'; tail -n 60 coverage-summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: coverage

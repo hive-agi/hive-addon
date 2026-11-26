@@ -51,13 +51,18 @@ jobs:
     name: root tool contract
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: DeLaGuardo/setup-clojure@13.0
+      - uses: actions/setup-java@v6
         with:
-          cli: latest
+          distribution: temurin
+          java-version: '25'
 
-      - uses: actions/cache@v4
+      - uses: DeLaGuardo/setup-clojure@13.7.0
+        with:
+          cli: 1.12.7.1681
+
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.m2/repository
